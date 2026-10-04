@@ -199,6 +199,7 @@ def _h3_step_profiler_factory():
                 torch.profiler.ProfilerActivity.CPU,
                 torch.profiler.ProfilerActivity.CUDA,
             ],
+            with_modules=True,
         ) as prof:
             yield
         logger.info(
@@ -206,8 +207,29 @@ def _h3_step_profiler_factory():
             step,
             prof.key_averages().table(sort_by="cuda_time_total", row_limit=30),
         )
+        # LOCAL ADDITION 2026-10-03: with_modules=True in the profile above is what answers
+        # "which module owns this kernel" -- key_averages() then carries nn.Module entries, at a
+        # tiny fraction of with_stack=True's cost (that one unwound Python stacks per op).
 
     return _prof
+
+
+# LOCAL ADDITION 2026-10-03: log-only per-stage timing. The denoise loop is already visible in
+# tqdm, but the non-denoise part of a request (text/vision encode, VAE decode, mp4 mux) was one
+# opaque 4.5 s block. H3_STAGE_TIMING=1 wraps the pipeline's stage methods so each reports itself.
+def _h3_stage_timed(fn):
+    import functools
+    import time
+
+    @functools.wraps(fn)
+    def _wrapper(*args, **kwargs):
+        t0 = time.perf_counter()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            logger.info("H3_STAGE %s %.3fs", fn.__name__, time.perf_counter() - t0)
+
+    return _wrapper
 
 
 MINIMAX_H3_FPS = 24
@@ -1411,7 +1433,36 @@ class MiniMaxH3Pipeline(
         # loads on all members (see the load_model/source gates below).
         from vllm.distributed.parallel_state import get_tp_group
 
-        return get_tp_group()
+        group = get_tp_group()
+        if group.world_size == text_encoder_tp_size:
+            return group
+        # LOCAL ADDITION 2026-10-03: with tensor_parallel_size == 1 the TP group is a single
+        # rank, so asking for a wider encoder silently collapsed to one rank and put the whole
+        # 63 GB Qwen3-VL encoder on rank 0 -- that is the TP1 x USP4 OOM. The encoder shards
+        # over the first ``text_encoder_tp_size`` DiT ranks (see DiffusionParallelConfig), and
+        # the diffusion world group is exactly that set. It has to be the *diffusion*
+        # coordinator: its collectives run on ``device_group`` directly, whereas vLLM's world
+        # group has no device communicator in these workers and raises
+        # "No device communicator found" at the first encoder all_reduce.
+        from vllm_omni.diffusion.distributed.parallel_state import (
+            get_sp_group,
+            get_world_group as get_dit_world_group,
+        )
+
+        world = get_dit_world_group()
+        if world.world_size == text_encoder_tp_size:
+            return world
+        try:
+            sp = get_sp_group()
+        except Exception:
+            sp = None
+        if sp is not None and sp.world_size == text_encoder_tp_size:
+            return sp
+        raise ValueError(
+            f"cannot shard the text encoder {text_encoder_tp_size}-way: the DiT TP group has "
+            f"{group.world_size} rank(s), the DiT world group {world.world_size}, and the "
+            f"sequence-parallel group {getattr(sp, 'world_size', None)}"
+        )
 
     def _encoder_group_broadcast_tensor(
         self,
@@ -3468,3 +3519,26 @@ __all__ = [
     "MiniMaxH3Pipeline",
     "get_minimax_h3_post_process_func",
 ]
+
+
+if os.environ.get("H3_STAGE_TIMING", "").lower() in ("1", "true", "yes"):
+    for _stage_name in ("prepare_encode", "encode_prompt", "denoise_step", "decode", "decode_to_mp4", "post_decode"):
+        _stage_fn = getattr(MiniMaxH3Pipeline, _stage_name, None)
+        if callable(_stage_fn):
+            setattr(MiniMaxH3Pipeline, _stage_name, _h3_stage_timed(_stage_fn))
+    # The worker's decode path does not route through MiniMaxH3Pipeline.decode on every shape, so
+    # time the VAEs themselves: video VAE, audio VAE, and the mp4 mux are the whole non-denoise
+    # budget once the encoder is measured separately.
+    try:
+        from vllm_omni.diffusion.models.minimax_h3.vae import (
+            MiniMaxH3AudioVAE,
+            MiniMaxH3VideoVAE,
+        )
+
+        for _cls in (MiniMaxH3VideoVAE, MiniMaxH3AudioVAE):
+            for _m in ("decode_latent", "encode_video", "encode_image", "encode_waveform"):
+                _fn = getattr(_cls, _m, None)
+                if callable(_fn):
+                    setattr(_cls, _m, _h3_stage_timed(_fn))
+    except Exception as _exc:  # never let instrumentation break a serve
+        logger.warning("H3_STAGE_TIMING: VAE timing not installed: %s", _exc)
