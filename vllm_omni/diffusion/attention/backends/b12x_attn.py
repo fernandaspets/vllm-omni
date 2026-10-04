@@ -56,6 +56,7 @@ def _capacity(n: int) -> int:
     return max(_CAPACITY_STEP, ((int(n) + _CAPACITY_STEP - 1) // _CAPACITY_STEP) * _CAPACITY_STEP)
 
 
+
 class B12xAttentionBackend(AttentionBackend):
     """SM120/SM121 attention through local-inference-lab/b12x."""
 
@@ -124,7 +125,7 @@ class B12xAttentionImpl(AttentionImpl):
                 max_seqlen_q=rows, max_seqlen_k=rows, causal=False,
                 block_sparse=sparse,
                 num_q_tiles=(num_tiles if sparse else 0),
-                total_blocks_cap=(total_blocks if sparse else 0),
+                total_blocks_cap=(max(1, total_blocks) if sparse else 0),
             )
             _PLAN_CACHE[key] = plan
         return key, plan
