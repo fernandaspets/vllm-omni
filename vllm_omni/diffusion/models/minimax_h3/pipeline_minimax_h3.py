@@ -23,7 +23,6 @@ from transformers import Qwen2TokenizerFast, Qwen3VLProcessor
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
-from vllm_omni.diffusion import envs
 from vllm_omni.diffusion.cache.cachedit import (
     CacheDiTBackend,
     RequestScopedCacheDiTRuntime,
@@ -31,7 +30,7 @@ from vllm_omni.diffusion.cache.cachedit import (
 from vllm_omni.diffusion.cache.teacache.hook import TeaCacheHook
 from vllm_omni.diffusion.cancellation import check_request_cancellation
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
-from vllm_omni.diffusion.distributed.parallel_state import get_world_group, init_world_group
+from vllm_omni.diffusion.distributed.parallel_state import get_world_group
 from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.forward_context import DenoiseProgressMixin
 from vllm_omni.diffusion.model_loader.diffusers_loader import (
@@ -178,6 +177,7 @@ if TYPE_CHECKING:
     from vllm.lora.peft_helper import PEFTHelper
 
     from vllm_omni.lora.request import LoRARequest
+
 
 def _h3_step_profiler_factory():
     """Env-gated per-step torch profiler (LOCAL ADDITION 2026-10-02).
@@ -1448,6 +1448,8 @@ class MiniMaxH3Pipeline(
         # "No device communicator found" at the first encoder all_reduce.
         from vllm_omni.diffusion.distributed.parallel_state import (
             get_sp_group,
+        )
+        from vllm_omni.diffusion.distributed.parallel_state import (
             get_world_group as get_dit_world_group,
         )
 

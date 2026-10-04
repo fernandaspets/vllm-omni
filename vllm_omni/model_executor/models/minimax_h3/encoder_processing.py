@@ -822,8 +822,7 @@ def encode_media(
         for length in reference_lengths[embedded_audio_count:]
     )
     ref_blocks.extend(
-        {"kind": "video", "ref_audio_t": 0, "latent_t": t, "latent_h": h, "latent_w": w}
-        for (t, h, w) in refmod_shapes
+        {"kind": "video", "ref_audio_t": 0, "latent_t": t, "latent_h": h, "latent_w": w} for (t, h, w) in refmod_shapes
     )
     video_edit_mask = None
     if video_edit_clean_rows is not None:

@@ -15,29 +15,6 @@ import huggingface_hub
 import torch
 from torch import nn
 from vllm.config.load import LoadConfig
-
-
-def _h3_prequant_manifest_keys() -> set[str]:
-    """Names the MiniMax-H3 pre-quantised loader released at construction (LOCAL ADDITION 2026-10-03).
-
-    H3_MX_PREQUANT stashes the stored e4m3 values and zero-sizes the wide bf16 projections, then
-    rebuilds each one as an Mxfp8Linear, so those names never reach a weight_loader and look
-    unloaded to the completeness check. Only active for that explicit env.
-    """
-    if os.environ.get("H3_MX_PREQUANT") != "1":
-        return set()
-    path = os.environ.get("H3_MX_PREQUANT_MANIFEST")
-    if not path:
-        return set()
-    try:
-        with open(path) as fh:
-            manifest = json.load(fh)
-    except Exception:
-        return set()
-    keys = manifest.get("quantized") if isinstance(manifest, dict) else manifest
-    if not isinstance(keys, (list, tuple, set)):
-        return set()
-    return {str(k) for k in keys}
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
@@ -87,6 +64,29 @@ from vllm_omni.diffusion.offloader.offload_plan import get_offload_plan
 from vllm_omni.diffusion.registry import initialize_model
 from vllm_omni.model_executor.model_loader.weight_utils import download_weights_from_hf_specific
 from vllm_omni.transformers_utils.repo_utils import hf_api
+
+
+def _h3_prequant_manifest_keys() -> set[str]:
+    """Names the MiniMax-H3 pre-quantised loader released at construction (LOCAL ADDITION 2026-10-03).
+
+    H3_MX_PREQUANT stashes the stored e4m3 values and zero-sizes the wide bf16 projections, then
+    rebuilds each one as an Mxfp8Linear, so those names never reach a weight_loader and look
+    unloaded to the completeness check. Only active for that explicit env.
+    """
+    if os.environ.get("H3_MX_PREQUANT") != "1":
+        return set()
+    path = os.environ.get("H3_MX_PREQUANT_MANIFEST")
+    if not path:
+        return set()
+    try:
+        with open(path) as fh:
+            manifest = json.load(fh)
+    except Exception:
+        return set()
+    keys = manifest.get("quantized") if isinstance(manifest, dict) else manifest
+    if not isinstance(keys, (list, tuple, set)):
+        return set()
+    return {str(k) for k in keys}
 
 
 # download_gguf was removed from upstream vLLM (commit 6635279d8).
@@ -1193,11 +1193,7 @@ class DiffusersPipelineLoader(HWRLoaderMixin):
                 # missing weights -- exempt exactly the manifest keys.
                 released = _h3_prequant_manifest_keys()
                 if released:
-                    exempt = {
-                        name
-                        for name in weights_not_loaded
-                        if any(name.endswith(key) for key in released)
-                    }
+                    exempt = {name for name in weights_not_loaded if any(name.endswith(key) for key in released)}
                     if exempt:
                         logger.info(
                             "MiniMax-H3 pre-quantised path: %d released wide weights are rebuilt as "

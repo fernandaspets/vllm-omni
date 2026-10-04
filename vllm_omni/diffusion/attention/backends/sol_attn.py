@@ -27,6 +27,7 @@ No permutation is needed because this backend passes an explicit `sink_start`.
 SM120 runs the **Triton** backend: NVIDIA's own SM120 integration removes the CuTe entry
 (`_CUTE_BACKENDS.pop((12, 0))`) and validates `sol_backend == "triton"`.
 """
+
 from __future__ import annotations
 
 import os
@@ -72,7 +73,7 @@ class SolAttnBackend(AttentionBackend):
         return "SOL_ATTN"
 
     @staticmethod
-    def get_impl_cls() -> type["SolAttnImpl"]:
+    def get_impl_cls() -> type[SolAttnImpl]:
         return SolAttnImpl
 
 
@@ -96,13 +97,11 @@ def _sink_rows(attn_metadata: AttentionMetadata | None) -> int:
     """
     if attn_metadata is None:
         return 0
-    extra = getattr(attn_metadata, "extra", None) or {}
     layout = getattr(attn_metadata, "video_layout", None)
     if layout is None:
         return 0
     try:
-        target = next(
-            (span for span in reversed(layout.video_spans) if span.role == "target"), None)
+        target = next((span for span in reversed(layout.video_spans) if span.role == "target"), None)
     except Exception:  # pragma: no cover - layout shape drift
         return 0
     if target is None:
@@ -159,9 +158,17 @@ class SolAttnImpl(AttentionImpl):
         key = (int(qb.shape[1]), int(qb.shape[2]), int(qb.shape[3]))
         if key in self.gated_shapes:
             return
-        got = _sol_attn(qb, kb, vb, scale=self.softmax_scale, tau=-1000.0,
-                        thresh_type=self.thresh_type, kv_splits=1,
-                        sink_tokens=0, sink_start=0)
+        got = _sol_attn(
+            qb,
+            kb,
+            vb,
+            scale=self.softmax_scale,
+            tau=-1000.0,
+            thresh_type=self.thresh_type,
+            kv_splits=1,
+            sink_tokens=0,
+            sink_start=0,
+        )
         want = _dense(qb[0], kb[0], vb[0]).unsqueeze(0)
         # fp32 oracle: the published ABSOLUTE limits were calibrated on the reference
         # stack's activations. Ours peak at ~54, where a 0.25 absolute difference is
@@ -170,8 +177,8 @@ class SolAttnImpl(AttentionImpl):
         # requires the kernel to be no worse than the dense path it replaces.
         q32, k32, v32 = qb.float(), kb.float(), vb.float()
         ref32 = torch.nn.functional.scaled_dot_product_attention(
-            q32.transpose(1, 2), k32.transpose(1, 2), v32.transpose(1, 2),
-            dropout_p=0.0, is_causal=False).transpose(1, 2)
+            q32.transpose(1, 2), k32.transpose(1, 2), v32.transpose(1, 2), dropout_p=0.0, is_causal=False
+        ).transpose(1, 2)
         e_sol = float((got.float() - ref32).abs().max())
         e_dense = float((want.float() - ref32).abs().max())
         scale = float(want.float().abs().max())
@@ -181,8 +188,10 @@ class SolAttnImpl(AttentionImpl):
             "max_abs": float((got.float() - want.float()).abs().max()),
             "max_rel": float((got.float() - want.float()).abs().max()) / max(scale, 1e-12),
             "activation_max_abs": scale,
-            "rel_l2": float(torch.linalg.vector_norm(got.float() - want.float())
-                            / torch.linalg.vector_norm(want.float()).clamp_min(1e-12)),
+            "rel_l2": float(
+                torch.linalg.vector_norm(got.float() - want.float())
+                / torch.linalg.vector_norm(want.float()).clamp_min(1e-12)
+            ),
         }
         limits = {
             "rel_l2": float(os.environ.get("SOL_ATTN_GATE_REL_L2", "0.005")),
@@ -193,11 +202,18 @@ class SolAttnImpl(AttentionImpl):
         logger.info(
             "SOL_ATTN correctness gate %s shape=%s kernel_vs_fp32 %.6g dense_vs_fp32 %.6g "
             "ratio %.3f (<= %.1f) rel_l2 %.6f (<= %.5f) activation_max %.4g tau=-1000",
-            "PASS" if passed else "FAIL", tuple(qb.shape), e_sol, e_dense, ratio,
-            limits["kernel_error_ratio"], stats["rel_l2"], limits["rel_l2"], scale)
+            "PASS" if passed else "FAIL",
+            tuple(qb.shape),
+            e_sol,
+            e_dense,
+            ratio,
+            limits["kernel_error_ratio"],
+            stats["rel_l2"],
+            limits["rel_l2"],
+            scale,
+        )
         if not passed:
-            raise RuntimeError(
-                f"Sol-Attn correctness gate failed on real QKV: {stats} > {limits}")
+            raise RuntimeError(f"Sol-Attn correctness gate failed on real QKV: {stats} > {limits}")
         self.gated_shapes.add(key)
 
     # -- attention -------------------------------------------------------------
@@ -230,10 +246,13 @@ class SolAttnImpl(AttentionImpl):
         if not self._logged_layout:
             self._logged_layout = True
             layout = getattr(attn_metadata, "video_layout", None)
-            spans = [(getattr(s, "role", None), int(getattr(s, "start", -1)),
-                      int(getattr(s, "length", -1))) for s in getattr(layout, "video_spans", []) or []]
-            logger.info("SOL_ATTN layout: q=%s kv=%s n=%d sink=%d spans=%s",
-                        tuple(q3.shape), tuple(k3.shape), n, sink, spans)
+            spans = [
+                (getattr(s, "role", None), int(getattr(s, "start", -1)), int(getattr(s, "length", -1)))
+                for s in getattr(layout, "video_spans", []) or []
+            ]
+            logger.info(
+                "SOL_ATTN layout: q=%s kv=%s n=%d sink=%d spans=%s", tuple(q3.shape), tuple(k3.shape), n, sink, spans
+            )
         qb = q3[:n].unsqueeze(0).contiguous()
         kb = k3[:n].unsqueeze(0).contiguous()
         vb = v3[:n].unsqueeze(0).contiguous()
@@ -242,7 +261,9 @@ class SolAttnImpl(AttentionImpl):
             self._run_gate(qb, kb, vb)
 
         out = _sol_attn(
-            qb, kb, vb,
+            qb,
+            kb,
+            vb,
             scale=self.softmax_scale,
             tau=self.tau,
             thresh_type=self.thresh_type,
@@ -258,9 +279,10 @@ class SolAttnImpl(AttentionImpl):
         self.last_sink_rows = sink
         if self._timed < 3:
             self._timed += 1
-            torch.cuda.synchronize()
-            logger.info("SOL_ATTN call %d: n=%d sink=%d took %.1f ms",
-                        self.sparse_calls, n, sink, (time.time() - _t0) * 1000.0)
+            torch.accelerator.synchronize()
+            logger.info(
+                "SOL_ATTN call %d: n=%d sink=%d took %.1f ms", self.sparse_calls, n, sink, (time.time() - _t0) * 1000.0
+            )
 
         if out.shape[1] != q3.shape[0]:
             full = q3.new_zeros((q3.shape[0],) + tuple(out.shape[2:]))
