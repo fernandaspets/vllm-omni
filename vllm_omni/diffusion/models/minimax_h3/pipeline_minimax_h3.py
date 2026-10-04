@@ -179,6 +179,37 @@ if TYPE_CHECKING:
 
     from vllm_omni.lora.request import LoRARequest
 
+def _h3_step_profiler_factory():
+    """Env-gated per-step torch profiler (LOCAL ADDITION 2026-10-02).
+
+    H3_STEP_PROFILE=1 profiles one denoise step and logs CUDA-time attribution;
+    H3_STEP_PROFILE_STEP selects the step (default 1, avoiding first-call warmup).
+    """
+    if os.environ.get("H3_STEP_PROFILE", "").lower() not in ("1", "true", "yes"):
+        return None
+    target = int(os.environ.get("H3_STEP_PROFILE_STEP", "1"))
+
+    @contextmanager
+    def _prof(step: int):
+        if step != target:
+            yield
+            return
+        with torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+        ) as prof:
+            yield
+        logger.info(
+            "H3_STEP_PROFILE step=%d\n%s",
+            step,
+            prof.key_averages().table(sort_by="cuda_time_total", row_limit=30),
+        )
+
+    return _prof
+
+
 MINIMAX_H3_FPS = 24
 MINIMAX_H3_AUDIO_SAMPLE_RATE = 32000
 MINIMAX_H3_IMGVID_COND_TIMESTEP = 0.999
@@ -1060,11 +1091,11 @@ class MiniMaxH3Pipeline(
             self.text_encoder = MiniMaxH3Qwen3VLEncoder(
                 os.path.join(model_path, "text_encoder"),
                 device=self.device,
-                load_model=rank < text_encoder_tp_size,
+                load_model=(self.text_encoder_group.world_size > 1 or rank == 0),
                 encoder_group=self.text_encoder_group,
                 quant_config=_resolve_minimax_h3_text_encoder_quant_config(od_config.quantization_config),
             )
-            if rank < text_encoder_tp_size:
+            if self.text_encoder_group.world_size > 1 or rank == 0:
                 self.weights_sources.append(
                     DiffusersPipelineLoader.ComponentSource(
                         model_or_path=str(model_path),
@@ -1373,12 +1404,14 @@ class MiniMaxH3Pipeline(
         """
         if text_encoder_tp_size == 1:
             return _SingleRankEncoderGroup(rank=self._dit_rank)
-        ranks = list(range(text_encoder_tp_size))
-        return init_world_group(
-            ranks=ranks,
-            local_rank=envs.LOCAL_RANK,
-            backend=current_omni_platform.dist_backend,
-        )
+        # Sharded encoder: return the TP group that the diffusion parallel state
+        # already created for this rank's SP slice.  It is a full GroupCoordinator
+        # (all_reduce/all_gather/broadcast, device_group, ranks, world_size), and
+        # every member of the group holds its own encoder shard, so the caller
+        # loads on all members (see the load_model/source gates below).
+        from vllm.distributed.parallel_state import get_tp_group
+
+        return get_tp_group()
 
     def _encoder_group_broadcast_tensor(
         self,
@@ -2099,6 +2132,7 @@ class MiniMaxH3Pipeline(
         with self._resident_dit_layers_on_device(enabled=transformer is self.transformer):
             with self.progress_bar(total=len(inputs["sigmas_video"]) - 1) as progress:
                 video_rows, audio_rows = minimax_h3_denoise_loop(
+                    step_profiler=_h3_step_profiler_factory(),
                     model=transformer,
                     positive=branch,
                     initial_video_rows=inputs["video_rows"],
