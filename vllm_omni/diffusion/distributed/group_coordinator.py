@@ -115,9 +115,7 @@ class GroupCoordinator:
                 # breaks the fused permute-free Ulysses exchange with "NCCL host
                 # communicator for group N not found".
                 device_id=(
-                    torch.device("cuda", self.local_rank)
-                    if str(torch_distributed_backend).endswith("nccl")
-                    else None
+                    torch.device("cuda", self.local_rank) if str(torch_distributed_backend).endswith("nccl") else None
                 ),
             )
             # a group with `gloo` backend, to allow direct coordination between
@@ -663,18 +661,18 @@ class PipelineGroupCoordinator(GroupCoordinator):
         if len(group_ranks[0]) > 2 or len(group_ranks[0]) == 1:
             for ranks in group_ranks:
                 device_group = torch.distributed.new_group(
-                ranks,
-                backend=torch_distributed_backend,
-                # Bind the communicator to this rank's device: symmetric-memory resolves a
-                # group's host communicator on the current device, so an unbound subgroup
-                # breaks the fused permute-free Ulysses exchange with "NCCL host
-                # communicator for group N not found".
-                device_id=(
-                    torch.device("cuda", self.local_rank)
-                    if str(torch_distributed_backend).endswith("nccl")
-                    else None
-                ),
-            )
+                    ranks,
+                    backend=torch_distributed_backend,
+                    # Bind the communicator to this rank's device: symmetric-memory resolves a
+                    # group's host communicator on the current device, so an unbound subgroup
+                    # breaks the fused permute-free Ulysses exchange with "NCCL host
+                    # communicator for group N not found".
+                    device_id=(
+                        torch.device("cuda", self.local_rank)
+                        if str(torch_distributed_backend).endswith("nccl")
+                        else None
+                    ),
+                )
                 # a group with `gloo` backend, to allow direct coordination between
                 # processes through the CPU.
                 cpu_group = torch.distributed.new_group(ranks, backend="gloo")
@@ -693,31 +691,31 @@ class PipelineGroupCoordinator(GroupCoordinator):
         elif len(group_ranks[0]) == 2:
             for ranks in group_ranks:
                 device_group_0_1 = torch.distributed.new_group(
-                ranks,
-                backend=torch_distributed_backend,
-                # Bind the communicator to this rank's device: symmetric-memory resolves a
-                # group's host communicator on the current device, so an unbound subgroup
-                # breaks the fused permute-free Ulysses exchange with "NCCL host
-                # communicator for group N not found".
-                device_id=(
-                    torch.device("cuda", self.local_rank)
-                    if str(torch_distributed_backend).endswith("nccl")
-                    else None
-                ),
-            )
+                    ranks,
+                    backend=torch_distributed_backend,
+                    # Bind the communicator to this rank's device: symmetric-memory resolves a
+                    # group's host communicator on the current device, so an unbound subgroup
+                    # breaks the fused permute-free Ulysses exchange with "NCCL host
+                    # communicator for group N not found".
+                    device_id=(
+                        torch.device("cuda", self.local_rank)
+                        if str(torch_distributed_backend).endswith("nccl")
+                        else None
+                    ),
+                )
                 device_group_1_0 = torch.distributed.new_group(
-                ranks,
-                backend=torch_distributed_backend,
-                # Bind the communicator to this rank's device: symmetric-memory resolves a
-                # group's host communicator on the current device, so an unbound subgroup
-                # breaks the fused permute-free Ulysses exchange with "NCCL host
-                # communicator for group N not found".
-                device_id=(
-                    torch.device("cuda", self.local_rank)
-                    if str(torch_distributed_backend).endswith("nccl")
-                    else None
-                ),
-            )
+                    ranks,
+                    backend=torch_distributed_backend,
+                    # Bind the communicator to this rank's device: symmetric-memory resolves a
+                    # group's host communicator on the current device, so an unbound subgroup
+                    # breaks the fused permute-free Ulysses exchange with "NCCL host
+                    # communicator for group N not found".
+                    device_id=(
+                        torch.device("cuda", self.local_rank)
+                        if str(torch_distributed_backend).endswith("nccl")
+                        else None
+                    ),
+                )
                 # a group with `gloo` backend, to allow direct coordination between
                 # processes through the CPU.
                 cpu_group_0_1 = torch.distributed.new_group(ranks, backend="gloo")
@@ -760,9 +758,7 @@ class PipelineGroupCoordinator(GroupCoordinator):
                 # breaks the fused permute-free Ulysses exchange with "NCCL host
                 # communicator for group N not found".
                 device_id=(
-                    torch.device("cuda", self.local_rank)
-                    if str(torch_distributed_backend).endswith("nccl")
-                    else None
+                    torch.device("cuda", self.local_rank) if str(torch_distributed_backend).endswith("nccl") else None
                 ),
             )
             if self.rank in ranks:
