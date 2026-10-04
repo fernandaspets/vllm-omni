@@ -99,13 +99,7 @@ class Mxfp8Linear:
     """Drop-in for a locally-sharded linear ``weight [out, in]`` on b12x MXFP8."""
 
     def __init__(
-        self,
-        weight: torch.Tensor,
-        *,
-        name: str = "h3-linear",
-        reduce: bool = False,
-        bias: torch.Tensor | None = None,
-        gather_output: bool = False,
+        self, weight: torch.Tensor, *, name: str = "h3-linear", reduce: bool = False, bias: torch.Tensor | None = None
     ):
         from b12x.gemm import mxfp8_linear
 
@@ -114,10 +108,6 @@ class Mxfp8Linear:
         self.out_features = int(weight.shape[0])
         self.reduce = bool(reduce)
         self.bias = bias
-        # LOCAL ADDITION 2026-10-03: the adaln projections are ColumnParallelLinear(gather_output=True),
-        # i.e. the GEMM is sharded on the output dim and the module gathers it back. Bypassing the
-        # module means doing that all-gather here, or the result comes back at 1/tp width.
-        self.gather_output = bool(gather_output)
         self.packed = mxfp8_linear.pack_weight(*quantize_rows(weight.detach().to(torch.bfloat16)))
         self._plan = None
         self._capacity = 0
@@ -131,8 +121,7 @@ class Mxfp8Linear:
         name: str = "h3-linear",
         reduce: bool = False,
         bias: torch.Tensor | None = None,
-        gather_output: bool = False,
-    ) -> Mxfp8Linear:
+    ) -> "Mxfp8Linear":
         """Build from a stored (e4m3 values, uint8 E8M0 scales) pair.
 
         ``quantize_rows`` emits exactly this pair, so packing a pre-quantised shard yields the
@@ -147,7 +136,6 @@ class Mxfp8Linear:
         self.out_features = int(values.shape[0])
         self.reduce = bool(reduce)
         self.bias = bias
-        self.gather_output = bool(gather_output)
         device = _device()
         self.packed = mxfp8_linear.pack_weight(values.to(device), scale_u8.to(device))
         self._plan = None
@@ -171,15 +159,14 @@ class Mxfp8Linear:
         if self.reduce and _tp_size() > 1:
             from vllm.distributed import tensor_model_parallel_all_reduce
 
-            out = tensor_model_parallel_all_reduce(out)
+            try:
+                import h3_ar_wire
+
+                out = h3_ar_wire.tp_all_reduce(out, tensor_model_parallel_all_reduce)
+            except Exception:
+                out = tensor_model_parallel_all_reduce(out)
         if self.bias is not None:
             out = out + self.bias
-        # After the bias: a column-parallel shard's bias covers only this rank's output slice,
-        # so it has to be added before the gather concatenates the slices.
-        if self.gather_output and _tp_size() > 1:
-            from vllm.distributed import tensor_model_parallel_all_gather
-
-            out = tensor_model_parallel_all_gather(out, dim=-1)
         return out, None
 
 

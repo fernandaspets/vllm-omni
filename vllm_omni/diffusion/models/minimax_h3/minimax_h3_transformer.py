@@ -69,7 +69,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-_PREQUANT_CACHE: set[str] | None | bool = False
+_PREQUANT_CACHE: "set[str] | None | bool" = False
 
 
 def _prequant_keys() -> set[str] | None:
@@ -877,15 +877,8 @@ class MiniMaxH3AdalnProj(nn.Module):
         """t_emb: [M, t_dim] -> expand_ratio tensors of [M*modality_num, H]."""
 
         def project() -> torch.Tensor:
-            x = nn.functional.silu(t_emb).to(_BF16_DTYPE)
-            # LOCAL ADDITION 2026-10-03: use the MXFP8 projection when _enable_mxfp8 built one,
-            # so the largest remaining unquantised weight (50 x [96768, 2688] plus the final
-            # layer's [10752, 2688] = 24.2 GiB bf16 whole-model) becomes fp8. The module is
-            # ColumnParallelLinear(gather_output=True); Mxfp8Linear reproduces that gather.
-            mx = getattr(self, "_mx_linear", None)
-            if mx is not None:
-                return mx(x)[0]
-            return self.linear(x)[0]
+            x = nn.functional.silu(t_emb)
+            return self.linear(x.to(_BF16_DTYPE))[0]
 
         x = (
             project()
@@ -1578,6 +1571,49 @@ class MiniMaxH3DiTModel(nn.Module):
             reduce_needed,
         )
 
+        # --- dynamic per-role quant policy (h3_quant_policy) ---
+        # Both linear classes are imported explicitly and chosen PER ROLE (mlp/attn/refiner)
+        # by h3_quant_policy, which reads the control file H3_QUANT_POLICY_CONTROL.
+        # 'bf16' means "do not swap": the DiT forward already falls back to the original
+        # vLLM linear when self._mx_* is None, and the free loop below skips such roles.
+        import os as _os
+
+        from vllm_omni.diffusion.models.minimax_h3.b12x_mxfp8 import (
+            Mxfp8Linear as _Mxfp8Cls,
+            prepare_shared as _mxfp8_prepare,
+        )
+
+        _nvfp4_ready = _os.environ.get("VLLM_OMNI_DIT_NVFP4", "0") == "1"
+        _Nvfp4Cls = _nvfp4_prepare = None
+        if _nvfp4_ready:
+            # NVFP4 (W4A4): same b12x op, FP4 weight, per-call activation global scale.
+            # Measured 2.13x on the four linears at M=19904; receipts in
+            # profile/sparse-attn-01/fp4/FINDINGS-nvfp4.md. Needs the port dir on PYTHONPATH.
+            from h3_nvfp4 import Nvfp4Linear as _Nvfp4Cls, prepare_shared as _nvfp4_prepare
+        from h3_quant_policy import policy_for as _policy_for, describe as _quant_describe
+
+        logger.info("MiniMax-H3 quant: %s", _quant_describe())
+
+        def _cls_for(leaf: str):
+            pol = _policy_for(leaf)
+            if pol == "bf16":
+                return None
+            if pol == "nvfp4":
+                if not _nvfp4_ready:
+                    # The policy file is permanent while the arm is per-boot, so a mismatch must NOT
+                    # kill the boot: downgrade to MXFP8 and say so loudly. (This raise killed the
+                    # MXFP8 arm's boot with 'Orchestrator initialization failed' until 2026-10-04.)
+                    logger.warning(
+                        "h3_quant: policy wants nvfp4 for %r but VLLM_OMNI_DIT_NVFP4 != 1; using mxfp8 for this role",
+                        leaf,
+                    )
+                    return _Mxfp8Cls
+                return _Nvfp4Cls
+            return _Mxfp8Cls
+
+        mxfp8_mods: list = []
+        nvfp4_mods: list = []
+
         modules = []
         stashed = 0
         stash_w = getattr(self, "_mx_stash_w", {})
@@ -1586,75 +1622,80 @@ class MiniMaxH3DiTModel(nn.Module):
         for index, block in enumerate(self.blocks):
             attn, mlp = block.attn, block.mlp
 
-            def build(module, leaf: str, name: str, *, reduce: bool = False, gather_output: bool = False):
+            def build(module, leaf: str, name: str, *, reduce: bool = False):
                 """Use the checkpoint's e4m3 shard when present, else quantise the bf16 shard."""
                 nonlocal stashed
                 key = f"blocks.{index}.{leaf}.weight"
                 values = stash_w.pop(key, None)
                 scales = stash_s.pop(key, None)
+                cls = _cls_for(name)  # bare role name (leaf may be dotted, e.g. 'attn.qkv_proj')
+                if cls is None:
+                    return None  # bf16 role: leave the original vLLM linear in place
                 if values is not None and scales is not None:
                     stashed += 1
-                    return Mxfp8Linear.from_quantized(
-                        values, scales, name=name, reduce=reduce, bias=module.bias, gather_output=gather_output
-                    )
-                return Mxfp8Linear(
-                    module.weight, name=name, reduce=reduce, bias=module.bias, gather_output=gather_output
-                )
+                    return cls.from_quantized(values, scales, name=name, reduce=reduce)
+                return cls(module.weight, name=name, reduce=reduce)
 
             attn._mx_qkv = build(attn.qkv_proj, "attn.qkv_proj", "qkv_proj")
             attn._mx_out_proj = build(attn.out_proj, "attn.out_proj", "out_proj", reduce=reduce_needed(attn.out_proj))
             mlp._mx_fc1 = build(mlp.fc1, "mlp.fc1", "fc1")
             mlp._mx_fc2 = build(mlp.fc2, "mlp.fc2", "fc2", reduce=reduce_needed(mlp.fc2))
-            modules += [attn._mx_qkv, attn._mx_out_proj, mlp._mx_fc1, mlp._mx_fc2]
-            # The adaln projection is the last wide unquantised weight. Few rows per step, so
-            # this is about weight bytes rather than FLOPs.
-            block._mx_adaln = build(block.adaln_proj.linear, "adaln_proj.linear", "adaln", gather_output=True)
-            modules.append(block._mx_adaln)
-        final_adaln_proj = getattr(getattr(self, "final_layer", None), "adaln_proj", None)
-        final_linear = getattr(final_adaln_proj, "linear", None)
-        if final_linear is not None and getattr(final_linear, "weight", None) is not None:
-            key = "final_layer.adaln_proj.linear.weight"
-            values = stash_w.pop(key, None)
-            scales = stash_s.pop(key, None)
-            if values is not None and scales is not None:
-                stashed += 1
-                final_adaln_proj._mx_linear = Mxfp8Linear.from_quantized(
-                    values, scales, name="adaln_final", bias=final_linear.bias, gather_output=True
-                )
-            else:
-                final_adaln_proj._mx_linear = Mxfp8Linear(
-                    final_linear.weight, name="adaln_final", bias=final_linear.bias, gather_output=True
-                )
-            modules.append(final_adaln_proj._mx_linear)
-        prepared = prepare_shared(modules)
+            for _m in (attn._mx_qkv, attn._mx_out_proj, mlp._mx_fc1, mlp._mx_fc2):
+                if _m is None:
+                    continue
+                if _Nvfp4Cls is not None and isinstance(_m, _Nvfp4Cls):
+                    nvfp4_mods.append(_m)
+                else:
+                    mxfp8_mods.append(_m)
+            modules += [m for m in (attn._mx_qkv, attn._mx_out_proj, mlp._mx_fc1, mlp._mx_fc2) if m is not None]
+        logger.info(
+            "MiniMax-H3 quant: roles resolved -> mxfp8=%d nvfp4=%d (starting plan prep)",
+            len(mxfp8_mods),
+            len(nvfp4_mods),
+        )
+        import time as _time
+
+        _t0 = _time.monotonic()
+        prepared = _mxfp8_prepare(mxfp8_mods) if mxfp8_mods else {}
+        logger.info(
+            "MiniMax-H3 quant: mxfp8 plan prep done in %.1fs (%d shapes)", _time.monotonic() - _t0, len(prepared)
+        )
+        _t1 = _time.monotonic()
+        prepared_fp4 = _nvfp4_prepare(nvfp4_mods) if nvfp4_mods else {}
+        logger.info(
+            "MiniMax-H3 quant: nvfp4 plan prep done in %.1fs (%d shapes)", _time.monotonic() - _t1, len(prepared_fp4)
+        )
         # The packed fp8 weight replaces the bf16 shard; keeping both would raise peak
         # memory instead of lowering it (that is what made TP1 x USP4 OOM at 95 GiB).
         freed = 0
+        bf16_roles = 0
         for block in self.blocks:
             for owner in (block.attn, block.mlp):
-                for name in ("qkv_proj", "out_proj", "fc1", "fc2"):
+                for attr, name in (
+                    ("_mx_qkv", "qkv_proj"),
+                    ("_mx_out_proj", "out_proj"),
+                    ("_mx_fc1", "fc1"),
+                    ("_mx_fc2", "fc2"),
+                ):
+                    if getattr(owner, name, None) is None:
+                        continue  # this owner never had that projection
+                    if getattr(owner, attr, None) is None:
+                        bf16_roles += 1  # role stayed bf16: its weight is still in use
+                        continue
                     mod = getattr(owner, name, None)
                     weight = getattr(mod, "weight", None) if mod is not None else None
                     if weight is not None and weight.numel():
                         freed += weight.numel() * weight.element_size()
                         weight.data = weight.data.new_empty(0)
-            adaln_weight = getattr(getattr(block.adaln_proj, "linear", None), "weight", None)
-            if adaln_weight is not None and adaln_weight.numel():
-                freed += adaln_weight.numel() * adaln_weight.element_size()
-                adaln_weight.data = adaln_weight.data.new_empty(0)
-        if (
-            final_linear is not None
-            and getattr(final_linear, "weight", None) is not None
-            and final_linear.weight.numel()
-        ):
-            freed += final_linear.weight.numel() * final_linear.weight.element_size()
-            final_linear.weight.data = final_linear.weight.data.new_empty(0)
         logger.info(
-            "MiniMax-H3 MXFP8: %d linears across %d shapes prepared %s; "
-            "%d from checkpoint; freed %.1f GiB of bf16 shards",
-            len(modules),
+            "MiniMax-H3 quant: %s | mxfp8=%d (%d shapes) nvfp4=%d (%d shapes) "
+            "bf16_roles=%d checkpoint=%d freed=%.1f GiB",
+            _quant_describe(),
+            len(mxfp8_mods),
             len(prepared),
-            prepared,
+            len(nvfp4_mods),
+            len(prepared_fp4),
+            bf16_roles,
             stashed,
             freed / 2**30,
         )

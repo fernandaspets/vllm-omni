@@ -13,6 +13,18 @@ from vllm_omni.platforms import current_omni_platform
 __all__ = ["all_to_all_4D", "all_to_all_5D", "SeqAllToAll4D", "SeqAllToAll5D", "RingComm"]
 
 
+def _h3_a2a_wire_all_to_all(input_t, group, seq_world_size):
+    """[experiment] optional int8 transport; falls back to the bf16 exchange (default path)."""
+    try:
+        import h3_a2a_wire
+
+        return h3_a2a_wire.all_to_all_4d(input_t, group, seq_world_size)
+    except Exception:  # pragma: no cover - never break the collective
+        out = torch.empty_like(input_t)
+        dist.all_to_all_single(out, input_t, group=group)
+        return out
+
+
 def all_to_all_4D(
     input: torch.tensor, scatter_idx: int = 2, gather_idx: int = 1, group=None, use_sync: bool = False
 ) -> torch.tensor:
@@ -39,6 +51,23 @@ def all_to_all_4D(
         seqlen = shard_seqlen * seq_world_size
         shard_hc = hc // seq_world_size
 
+        # int8-fused qkv transport (control-file gated, default off): the wire kernels read the
+        # source rows and write the final (bs, seqlen, hc/P, hs) layout, so the two bf16 layout
+        # passes around the collective disappear. Returns None -> stock path below.
+        try:
+            import h3_a2a_wire as _h3a2aw
+
+            if _h3a2aw.fused_enabled():
+                _fused = _h3a2aw.all_to_all_4d_qkv_fused(input.contiguous(), group, seq_world_size)
+                if _fused is not None:
+                    if use_sync:
+                        from vllm_omni.platforms import current_omni_platform
+
+                        current_omni_platform.synchronize()
+                    return _fused
+        except Exception:
+            pass
+
         # transpose groups of heads with the seq-len parallel dimension, so that we can scatter them!
         # (bs, seqlen/P, hc, hs) -reshape-> (bs, seq_len/P, P, hc/P, hs) -transpose(0,2)-> (P, seq_len/P, bs, hc/P, hs)
         input_t = input.reshape(bs, shard_seqlen, seq_world_size, shard_hc, hs).transpose(0, 2).contiguous()
@@ -48,7 +77,7 @@ def all_to_all_4D(
         # (P, seq_len/P, bs, hc/P, hs) scatter seqlen -all2all-> (P, seq_len/P, bs, hc/P, hs) scatter head
 
         if seq_world_size > 1:
-            dist.all_to_all_single(output, input_t, group=group)
+            output = _h3_a2a_wire_all_to_all(input_t, group, seq_world_size)
             if use_sync:
                 current_omni_platform.synchronize()
         else:
@@ -83,7 +112,7 @@ def all_to_all_4D(
         # https://pytorch.org/docs/stable/distributed.html#torch.distributed.all_to_all_single
         # (P, bs x hc/P, seqlen/P, hs) scatter seqlen -all2all-> (P, bs x seq_len/P, hc/P, hs) scatter head
         if seq_world_size > 1:
-            dist.all_to_all_single(output, input_t, group=group)
+            output = _h3_a2a_wire_all_to_all(input_t, group, seq_world_size)
             if use_sync:
                 current_omni_platform.synchronize()
         else:
@@ -155,7 +184,7 @@ def all_to_all_5D(
         # https://pytorch.org/docs/stable/distributed.html#torch.distributed.all_to_all_single
         # (P, seq_len/P, 3, bs, hc/P, hs) scatter seqlen -all2all-> (P, seq_len/P, 3, bs, hc/P, hs) scatter head
         if seq_world_size > 1:
-            dist.all_to_all_single(output, input_t, group=group)
+            output = _h3_a2a_wire_all_to_all(input_t, group, seq_world_size)
             if use_sync:
                 current_omni_platform.synchronize()
         else:
@@ -190,7 +219,7 @@ def all_to_all_5D(
         # https://pytorch.org/docs/stable/distributed.html#torch.distributed.all_to_all_single
         # (P, bs x hc/P, seqlen/P, hs) scatter seqlen -all2all-> (P, bs x seq_len/P, hc/P, hs) scatter head
         if seq_world_size > 1:
-            dist.all_to_all_single(output, input_t, group=group)
+            output = _h3_a2a_wire_all_to_all(input_t, group, seq_world_size)
             if use_sync:
                 current_omni_platform.synchronize()
         else:
