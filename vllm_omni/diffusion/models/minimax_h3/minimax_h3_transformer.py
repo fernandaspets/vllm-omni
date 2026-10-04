@@ -69,7 +69,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-_PREQUANT_CACHE: "set[str] | None | bool" = False
+_PREQUANT_CACHE: set[str] | None | bool = False
 
 
 def _prequant_keys() -> set[str] | None:
@@ -1565,12 +1565,6 @@ class MiniMaxH3DiTModel(nn.Module):
         """
         if not _mxfp8_enabled():
             return
-        from vllm_omni.diffusion.models.minimax_h3.b12x_mxfp8 import (
-            Mxfp8Linear,
-            prepare_shared,
-            reduce_needed,
-        )
-
         # --- dynamic per-role quant policy (h3_quant_policy) ---
         # Both linear classes are imported explicitly and chosen PER ROLE (mlp/attn/refiner)
         # by h3_quant_policy, which reads the control file H3_QUANT_POLICY_CONTROL.
@@ -1580,7 +1574,12 @@ class MiniMaxH3DiTModel(nn.Module):
 
         from vllm_omni.diffusion.models.minimax_h3.b12x_mxfp8 import (
             Mxfp8Linear as _Mxfp8Cls,
+        )
+        from vllm_omni.diffusion.models.minimax_h3.b12x_mxfp8 import (
             prepare_shared as _mxfp8_prepare,
+        )
+        from vllm_omni.diffusion.models.minimax_h3.b12x_mxfp8 import (
+            reduce_needed,
         )
 
         _nvfp4_ready = _os.environ.get("VLLM_OMNI_DIT_NVFP4", "0") == "1"
@@ -1589,8 +1588,10 @@ class MiniMaxH3DiTModel(nn.Module):
             # NVFP4 (W4A4): same b12x op, FP4 weight, per-call activation global scale.
             # Measured 2.13x on the four linears at M=19904; receipts in
             # profile/sparse-attn-01/fp4/FINDINGS-nvfp4.md. Needs the port dir on PYTHONPATH.
-            from h3_nvfp4 import Nvfp4Linear as _Nvfp4Cls, prepare_shared as _nvfp4_prepare
-        from h3_quant_policy import policy_for as _policy_for, describe as _quant_describe
+            from h3_nvfp4 import Nvfp4Linear as _Nvfp4Cls
+            from h3_nvfp4 import prepare_shared as _nvfp4_prepare
+        from h3_quant_policy import describe as _quant_describe
+        from h3_quant_policy import policy_for as _policy_for
 
         logger.info("MiniMax-H3 quant: %s", _quant_describe())
 
