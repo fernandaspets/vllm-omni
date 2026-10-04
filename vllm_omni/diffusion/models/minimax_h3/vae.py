@@ -378,14 +378,14 @@ class MiniMaxH3VideoVAE(nn.Module, DistributedVaeMixin):
             _h3vae_ok = install_vae_sm120_fixes(self, device=device)
             try:
                 with open("/mnt/2king/build/h3/research/2026-10-03-step-profile/VAE_HOOK_TRACE", "a") as _t:
-                    _t.write("install returned %s\n" % _h3vae_ok)
+                    _t.write(f"install returned {_h3vae_ok}\n")
             except Exception:
                 pass
         except Exception as _h3vae_exc:  # optional path: never fail model load
             logger.warning("h3_vae_sm120 not installed: %s", _h3vae_exc)
             try:
                 with open("/mnt/2king/build/h3/research/2026-10-03-step-profile/VAE_HOOK_TRACE", "a") as _t:
-                    _t.write("install EXC %s: %s\n" % (type(_h3vae_exc).__name__, _h3vae_exc))
+                    _t.write(f"install EXC {type(_h3vae_exc).__name__}: {_h3vae_exc}\n")
             except Exception:
                 pass
         self._stager = None
