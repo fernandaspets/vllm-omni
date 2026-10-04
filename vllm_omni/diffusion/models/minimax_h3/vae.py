@@ -373,7 +373,7 @@ class MiniMaxH3VideoVAE(nn.Module, DistributedVaeMixin):
         except Exception:
             pass
         try:
-            from h3_vae_sm120 import install_vae_sm120_fixes
+            from vllm_omni.diffusion.h3.vae_sm120 import install_vae_sm120_fixes
 
             _h3vae_ok = install_vae_sm120_fixes(self, device=device)
             try:
