@@ -8,7 +8,7 @@ Why
 Our checkpoint's decoder `FeedForward` calls `self.w2(hidden_states)` - an `addmm`, i.e. a GEMM with a
 fused bias epilogue. On compute capability 12.x that epilogue makes cuBLAS pick a 16x16 wmma kernel:
 SGLang measured 14 TFLOPS fused versus 76-91 TFLOPS with the bias added separately (4.0 ms -> 0.8 ms
-per `w2` call, ~3780 calls per decode). We run RTX PRO 6000 Blackwell (capability 12.0).
+per `w2` call, ~3780 calls per decode). The target part is SM120 (capability 12.0).
 
 vLLM-Omni's own fused VAE ops cannot help: `ops/vae/dispatch.py`'s `H3_VAE_OPERATOR_TABLE` covers
 sm90/sm100/sm103 only, so `resolve_h3_vae_operators()` returns None on sm12x and
@@ -102,9 +102,7 @@ def _find_feed_forwards(root: torch.nn.Module) -> list[torch.nn.Module]:
         if id(module) in seen:
             continue
         seen.add(id(module))
-        looks_like = type(module).__name__ == "FeedForward" or (
-            hasattr(module, "w1") and hasattr(module, "w2")
-        )
+        looks_like = type(module).__name__ == "FeedForward" or (hasattr(module, "w1") and hasattr(module, "w2"))
         if looks_like and isinstance(getattr(module, "w2", None), torch.nn.Linear):
             found.append(module)
         try:

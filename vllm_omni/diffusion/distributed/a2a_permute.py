@@ -69,10 +69,10 @@ def _ensure_built() -> None:
         nvidia_root = os.path.join(site_packages, "nvidia")
         include_paths = glob.glob(os.path.join(nvidia_root, "*", "include"))
         nccl_libs = glob.glob(os.path.join(nvidia_root, "nccl", "lib", "libnccl.so*"))
-        # The karmic image ships its OWN NCCL instead of PyPI nvidia-nccl-cu13:
-        # site-packages/local_inference_nccl/lib/libnccl.so.2.31.2 (+ nccl_device headers).
+        # The runtime ships its own NCCL instead of the PyPI nvidia-nccl-cu13:
+        # a bundled libnccl.so plus the nccl_device headers.
         # Without this fallback the build aborts with "could not locate nvidia-nccl libnccl.so",
-        # which kills the whole lane at model init (measured 2026-10-03).
+        # which kills the whole lane at model init.
         if not nccl_libs or not any(os.path.isfile(os.path.join(path, "nccl.h")) for path in include_paths):
             for root in sorted(
                 glob.glob(os.path.join(site_packages, "*nccl*")) + glob.glob(os.path.join(site_packages, "nvidia", "*"))
@@ -80,7 +80,7 @@ def _ensure_built() -> None:
                 include_paths += glob.glob(os.path.join(root, "include"))
                 nccl_libs += glob.glob(os.path.join(root, "lib", "libnccl.so*"))
         if not nccl_libs:
-            raise RuntimeError("a2a_permute: could not locate libnccl.so (checked nvidia/* and local_inference_nccl)")
+            raise RuntimeError("a2a_permute: could not locate libnccl.so (checked the usual site-packages locations)")
         if not any(os.path.isfile(os.path.join(path, "nccl.h")) for path in include_paths):
             raise RuntimeError("a2a_permute: could not locate nccl.h")
         load(
@@ -117,7 +117,7 @@ def _symm_group_name(group_name: str) -> str:
 
     Use the process group's OWN name. An earlier revision renamed it ("a2a_symm_36") and
     registered that with c10d, on the theory that the host-communicator registry is keyed by
-    registered name. Measured 2026-10-03 on torch 2.14: the renaming is itself what breaks
+    registered name. The renaming is itself what breaks
     it -- rendezvous(t, pg) and rendezvous(t, pg.group_name) both succeed, while the alias
     fails with "NCCL host communicator for group a2a_symm_... not found".
     """

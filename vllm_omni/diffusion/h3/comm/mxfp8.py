@@ -2,7 +2,7 @@
 
 `comm_quant.merge_output_fp8_as_mxfp8` returns Sol-H3's `MXActivation` so the transported E4M3 bytes
 can be reused directly as the next MXFP8 linear's activation (skipping a BF16 round trip and a
-re-quantisation). Our lane builds MXFP8 activations through its own module, so this shim exists to
+re-quantisation). This lane builds MXFP8 activations through its own module, so this shim exists to
 keep the ported code importable now and to be pointed at the lane's real type when that path is wired
 (see the lane's comm-quant port plan).
 
@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 
 _MX_ACTIVATION = None
-try:  # our lane's MXFP8 activation type, if it exposes one under a known name
+try:  # this lane's MXFP8 activation type, if it exposes one under a known name
     from vllm_omni.diffusion.models.minimax_h3.b12x_mxfp8 import (
         MXActivation as _MX_ACTIVATION,  # type: ignore  # noqa: E501
     )

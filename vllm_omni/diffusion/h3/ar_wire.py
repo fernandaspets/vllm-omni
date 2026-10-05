@@ -20,8 +20,10 @@ Env:
 Any failure, unexpected dtype/shape, or world != 2 falls back to the caller's original all-reduce
 and logs once. Never breaks the lane.
 """
+
 from __future__ import annotations
 
+import logging
 import os
 
 import torch
@@ -31,12 +33,14 @@ import triton.language as tl
 
 from . import a2a_wire as w
 
+logger = logging.getLogger(__name__)
+
 TAG = "[h3_ar_wire]"
 _STATE = {"calls": 0, "failed": False, "logged_mode": None}
 
 
 def _log(msg: str) -> None:
-    print(f"{TAG} {msg}", flush=True)
+    logger.info("%s %s", TAG, msg)
 
 
 def _wire() -> str:
@@ -59,8 +63,9 @@ def enabled() -> bool:
 
 
 @triton.jit
-def _decode_add_kernel(packet_ptr, local_ptr, out_ptr, records,
-                       RECORDS: tl.constexpr, PACKET: tl.constexpr, VALUE_OFFSET: tl.constexpr):
+def _decode_add_kernel(
+    packet_ptr, local_ptr, out_ptr, records, RECORDS: tl.constexpr, PACKET: tl.constexpr, VALUE_OFFSET: tl.constexpr
+):
     """(records, PACKET) uint8 + (records, 128) bf16 -> (records, 128) bf16 = local + decoded."""
     record = tl.program_id(0) * RECORDS + tl.arange(0, RECORDS)
     columns = tl.arange(0, 128)
@@ -69,12 +74,11 @@ def _decode_add_kernel(packet_ptr, local_ptr, out_ptr, records,
     stored = tl.load(packet_ptr + base + columns[None, :], mask=valid, other=VALUE_OFFSET).to(tl.int32)
     group = columns // 32
     code = tl.load(packet_ptr + base + 128 + group[None, :], mask=valid, other=0).to(tl.int32)
-    scale_bits = ((((code >> 3) - 15 + 127) << 23) | ((code & 7) << 20))
+    scale_bits = (((code >> 3) - 15 + 127) << 23) | ((code & 7) << 20)
     scale = scale_bits.to(tl.float32, bitcast=True)
     dec = (stored - VALUE_OFFSET).to(tl.float32) * scale
     loc = tl.load(local_ptr + record[:, None] * 128 + columns[None, :], mask=valid, other=0.0)
-    tl.store(out_ptr + record[:, None] * 128 + columns[None, :], (loc.to(tl.float32) + dec).to(tl.bfloat16),
-             mask=valid)
+    tl.store(out_ptr + record[:, None] * 128 + columns[None, :], (loc.to(tl.float32) + dec).to(tl.bfloat16), mask=valid)
 
 
 def _tensor_group():
@@ -107,8 +111,10 @@ def _workspace(records: int, device, world: int):
         st["pkt"] = torch.empty(records * w.OUTPUT_PACKET, dtype=torch.uint8, device=device)
         st["recv"] = torch.empty(world * records * w.OUTPUT_PACKET, dtype=torch.uint8, device=device)
         st["cap"] = records
-        _log(f"AR workspace for {records} records/world={world}: pkt={records * w.OUTPUT_PACKET} B "
-             f"recv={world * records * w.OUTPUT_PACKET} B")
+        _log(
+            f"AR workspace for {records} records/world={world}: pkt={records * w.OUTPUT_PACKET} B "
+            f"recv={world * records * w.OUTPUT_PACKET} B"
+        )
     pkt = st["pkt"][: records * w.OUTPUT_PACKET].view(records, w.OUTPUT_PACKET)
     recv = st["recv"][: world * records * w.OUTPUT_PACKET]
     return pkt, recv
@@ -130,8 +136,12 @@ def quant_reduce(x: torch.Tensor, device_group=None) -> torch.Tensor:
     pkt, recv = _workspace(records, x.device, world)
 
     w._encode_pack_kernel[(triton.cdiv(records, w._rpp()),)](
-        flat, pkt, records,
-        RECORDS=w._rpp(), PACKET=w.OUTPUT_PACKET, VALUE_OFFSET=w.VALUE_BIAS,
+        flat,
+        pkt,
+        records,
+        RECORDS=w._rpp(),
+        PACKET=w.OUTPUT_PACKET,
+        VALUE_OFFSET=w.VALUE_BIAS,
         num_warps=w._warps(),
     )
     dist.all_gather_into_tensor(recv, pkt.reshape(-1), group=device_group)
@@ -142,8 +152,13 @@ def quant_reduce(x: torch.Tensor, device_group=None) -> torch.Tensor:
     # in place: vllm's tensor_model_parallel_all_reduce also reduces in place, so this keeps the
     # caller's contract and costs no output allocation. Each element reads then writes itself.
     _decode_add_kernel[(triton.cdiv(records, w._rpp()),)](
-        peer_pkt, flat, flat, records,
-        RECORDS=w._rpp(), PACKET=w.OUTPUT_PACKET, VALUE_OFFSET=w.VALUE_BIAS,
+        peer_pkt,
+        flat,
+        flat,
+        records,
+        RECORDS=w._rpp(),
+        PACKET=w.OUTPUT_PACKET,
+        VALUE_OFFSET=w.VALUE_BIAS,
         num_warps=w._warps(),
     )
 
