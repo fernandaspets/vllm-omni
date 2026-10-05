@@ -1254,8 +1254,12 @@ class MiniMaxH3DiTModel(nn.Module):
         quant_config: QuantizationConfig | None = None,
         *,
         diffusers_weights: bool | None = None,
+        partition: str = "ref2va",
     ) -> None:
         super().__init__()
+        # The served partition. The turbo-fuse path validates an adapter against it, and the
+        # loader rejects an fl2v adapter on Ref2VA and a ref2v adapter anywhere but Ref2VA.
+        self._h3_partition = partition
         tf_config = od_config.tf_model_config
         config_mapping = tf_config.to_dict() if hasattr(tf_config, "to_dict") else dict(tf_config)
         # The native MiniMax-H3 Hub snapshot advertises the Diffusers
@@ -1464,7 +1468,7 @@ class MiniMaxH3DiTModel(nn.Module):
 
         request = LoRARequest(lora_name="h3-fuse", lora_int_id=1, lora_path=path)
         loaded = load_minimax_h3_turbo_lora(
-            partition="ref2va",
+            partition=self._h3_partition,
             lora_request=request,
             lora_path=path,
             dtype=_BF16_DTYPE,
