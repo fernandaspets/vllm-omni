@@ -40,6 +40,7 @@ def minimax_h3_batched_forward_kwargs(
     audio_ref_cond_timesteps: Sequence[float],
     video_target_timesteps: Sequence[torch.Tensor | None] | None = None,
     audio_target_timesteps: Sequence[torch.Tensor | None] | None = None,
+    endpoints: Sequence[tuple[float, float]] | None = None,
 ) -> dict[str, Any]:
     """Build one DiT forward kwargs dict covering every request in the batch.
 
@@ -58,6 +59,8 @@ def minimax_h3_batched_forward_kwargs(
     elif len(audio_target_timesteps) != request_count:
         raise ValueError(f"audio_target_timesteps has {len(audio_target_timesteps)} requests, expected {request_count}")
 
+    if endpoints is not None and len(endpoints) != len(branches):
+        raise ValueError(f"endpoints has {len(endpoints)} requests, expected {len(branches)}")
     if len(branches) == 1:
         return branches[0].forward_kwargs(
             video_rows=video_rows[0],
@@ -68,6 +71,7 @@ def minimax_h3_batched_forward_kwargs(
             audio_ref_cond_timestep=audio_ref_cond_timesteps[0],
             video_target_timesteps=video_target_timesteps[0],
             audio_target_timesteps=audio_target_timesteps[0],
+            endpoints=None if endpoints is None else endpoints[0],
         )
 
     device = branches[0].device
@@ -88,6 +92,9 @@ def minimax_h3_batched_forward_kwargs(
     # Non-media rows (text and alignment padding) inherit their request's video
     # timestep, matching the single-request packed-sequence semantics.
     timesteps = torch.empty(total_seq, dtype=torch.float32, device=device)
+    endpoint_values = (
+        torch.empty(total_seq, dtype=torch.float32, device=device) if endpoints is not None else None
+    )
 
     seq_offset = 0
     text_offset = 0
@@ -111,6 +118,14 @@ def minimax_h3_batched_forward_kwargs(
             video_target_timesteps=video_target_timesteps[index],
             audio_target_timesteps=audio_target_timesteps[index],
         )
+        if endpoint_values is not None:
+            branch.fill_endpoints(
+                endpoint_values[seq_offset : seq_offset + branch.seq_len],
+                r_video=endpoints[index][0],
+                r_audio=endpoints[index][1],
+                imgvid_cond_timestep=imgvid_cond_timesteps[index],
+                audio_ref_cond_timestep=audio_ref_cond_timesteps[index],
+            )
 
         # Empty documents are omitted because not every varlen kernel accepts
         # repeated interior boundaries.
@@ -138,7 +153,14 @@ def minimax_h3_batched_forward_kwargs(
         torch.cat([rows.to(device=device, dtype=torch.float32) for rows in audio_rows]),
     )
 
-    unique_timesteps, inverse_indices = torch.unique(timesteps, sorted=True, return_inverse=True)
+    unique_endpoints = None
+    if endpoint_values is None:
+        unique_timesteps, inverse_indices = torch.unique(timesteps, sorted=True, return_inverse=True)
+    else:
+        pairs = torch.stack((timesteps, endpoint_values), dim=-1)
+        unique_pairs, inverse_indices = torch.unique(pairs, dim=0, sorted=True, return_inverse=True)
+        unique_timesteps = unique_pairs[:, 0].contiguous()
+        unique_endpoints = unique_pairs[:, 1].contiguous()
     return {
         "x": x,
         "audio_x": audio_x,
@@ -166,6 +188,7 @@ def minimax_h3_batched_forward_kwargs(
             "max_seqlen_q": refiner_max_seqlen,
         },
         "unique_timesteps": unique_timesteps,
+        "unique_endpoints": unique_endpoints,
         "inverse_indices": inverse_indices,
     }
 

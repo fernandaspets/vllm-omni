@@ -190,6 +190,7 @@ class MiniMaxH3DenoiseBranch:
         audio_ref_cond_timestep: float,
         video_target_timesteps: torch.Tensor | None = None,
         audio_target_timesteps: torch.Tensor | None = None,
+        endpoints: tuple[float, float] | None = None,
     ) -> dict[str, Any]:
         x = self.x_base.clone()
         x[0].index_copy_(0, self.img_pos_dev, video_rows)
@@ -205,12 +206,28 @@ class MiniMaxH3DenoiseBranch:
             video_target_timesteps=video_target_timesteps,
             audio_target_timesteps=audio_target_timesteps,
         )
-        unique_timesteps, inverse_indices = torch.unique(timesteps, sorted=True, return_inverse=True)
+        unique_endpoints = None
+        if endpoints is None:
+            unique_timesteps, inverse_indices = torch.unique(timesteps, sorted=True, return_inverse=True)
+        else:
+            endpoint_values = torch.empty(self.seq_len, dtype=torch.float32, device=self.device)
+            self.fill_endpoints(
+                endpoint_values,
+                r_video=endpoints[0],
+                r_audio=endpoints[1],
+                imgvid_cond_timestep=imgvid_cond_timestep,
+                audio_ref_cond_timestep=audio_ref_cond_timestep,
+            )
+            pairs = torch.stack((timesteps, endpoint_values), dim=-1)
+            unique_pairs, inverse_indices = torch.unique(pairs, dim=0, sorted=True, return_inverse=True)
+            unique_timesteps = unique_pairs[:, 0].contiguous()
+            unique_endpoints = unique_pairs[:, 1].contiguous()
         return {
             **self.static_kwargs,
             "x": x,
             "audio_x": audio_x,
             "unique_timesteps": unique_timesteps,
+            "unique_endpoints": unique_endpoints,
             "inverse_indices": inverse_indices,
         }
 
@@ -263,6 +280,30 @@ class MiniMaxH3DenoiseBranch:
                     )
                 timesteps[target_positions] = target_timesteps
             timesteps[positions[~update_mask]] = condition_timestep
+
+
+    def fill_endpoints(
+        self,
+        endpoints: torch.Tensor,
+        *,
+        r_video: float,
+        r_audio: float,
+        imgvid_cond_timestep: float,
+        audio_ref_cond_timestep: float,
+    ) -> None:
+        """Fill one request's packed row endpoints, the ``r`` of each ``(t, r)`` pair.
+
+        Generated rows aim at the step's interval end; anchors cannot move, so their
+        endpoint is their own timestep (``ref2va`` audio reference rows are held at 1.0).
+        """
+        if endpoints.shape != (self.seq_len,):
+            raise ValueError(f"endpoints must have shape ({self.seq_len},)")
+        endpoints.fill_(float(r_video))
+        endpoints[self.img_pos_dev[self.update_mask_dev]] = float(r_video)
+        endpoints[self.img_pos_dev[~self.update_mask_dev]] = float(imgvid_cond_timestep)
+        audio_endpoint = r_audio if self.locked_audio_rows is None else 1.0
+        endpoints[self.audio_pos_dev[self.audio_update_mask_dev]] = float(audio_endpoint)
+        endpoints[self.audio_pos_dev[~self.audio_update_mask_dev]] = float(audio_ref_cond_timestep)
 
 
 def minimax_h3_prepare_denoise_rows(
@@ -369,6 +410,8 @@ def minimax_h3_denoise_loop(
     video_solver = create_h3_sample_solver(sampler, sigmas_video)
     audio_solver = create_h3_sample_solver(sampler, sigmas_audio)
     num_steps = len(sigmas_video) - 1
+    # HyperFlow conditions each step on the interval (t, r); the base model ignores r.
+    hyperflow = getattr(model, "_hyperflow_gate", None) is not None
     for step in range(num_steps):
         check_request_cancellation()
         step_cm = step_profiler(step) if step_profiler is not None else nullcontext()
@@ -381,6 +424,8 @@ def minimax_h3_denoise_loop(
             # for a rectified-flow schedule is the video sigma.
             minimax_h3_publish_denoise_progress(step, s_v, num_steps)
             t_v, t_a = 1.0 - s_v, 1.0 - s_a
+            r_v = 1.0 - sigmas_video[step + 1]
+            r_a = 1.0 - sigmas_audio[step + 1]
             imgvid_cond_t = max(t_v, float(imgvid_cond_noise_aug_for_inference))
             audio_ref_cond_t = max(t_a, float(audio_cond_noise_aug_for_inference))
 
@@ -410,6 +455,7 @@ def minimax_h3_denoise_loop(
                 audio_ref_cond_timestep=audio_ref_cond_t,
                 video_target_timesteps=video_target_timesteps,
                 audio_target_timesteps=audio_target_timesteps,
+                endpoints=(r_v, r_a) if hyperflow else None,
             )
             with torch.inference_mode():
                 v_video, v_audio = model(**fk)

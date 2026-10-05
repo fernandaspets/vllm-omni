@@ -414,6 +414,8 @@ def _minimax_h3_step_schedule(state: StepRequestState) -> dict[str, float]:
         "t_audio": t_audio,
         "imgvid_cond_timestep": max(t_video, MINIMAX_H3_IMGVID_COND_TIMESTEP),
         "audio_ref_cond_timestep": max(t_audio, MINIMAX_H3_AUDIO_REF_COND_TIMESTEP),
+        "r_video": 1.0 - float(sigmas_video[step + 1]),
+        "r_audio": 1.0 - float(sigmas_audio[step + 1]),
     }
 
 
@@ -1369,6 +1371,11 @@ class MiniMaxH3Pipeline(
             return self.transformers_ref
         return self.transformer
 
+    def _hyperflow_for_task(self, task: str) -> MiniMaxH3DiTModel | None:
+        """The DiT that serves ``task`` when it carries a fused HyperFlow adapter."""
+        transformer = self._transformer_for_task(task)
+        return transformer if getattr(transformer, "_hyperflow_gate", None) is not None else None
+
     def _resolve_sigma_positions(self, task: str, sampling: Any) -> tuple[tuple[float, ...] | None, int]:
         """Pick the rectified-flow positions this request denoises on.
 
@@ -1376,6 +1383,19 @@ class MiniMaxH3Pipeline(
         derived from the step count, together with the count the rest of the
         request speaks in.
         """
+        hyperflow = self._hyperflow_for_task(task)
+        if hyperflow is not None:
+            # The adapter was distilled on one fixed grid; the uniform ladder would
+            # sample the wrong points and the two-time conditioning would be wrong.
+            positions = tuple(float(s) for s in hyperflow._hyperflow_sigmas)
+            num_steps = len(positions) - 1
+            requested_steps = sampling.num_inference_steps
+            if requested_steps is not None and int(requested_steps) != num_steps:
+                raise OmniClientError(
+                    "this MiniMax H3 DiT carries a HyperFlow adapter; num_inference_steps "
+                    f"must be {num_steps} or omitted, got {int(requested_steps)}"
+                )
+            return positions, num_steps
         if self._fasth3 is not None:
             # A fused student carries its own positions; the checkpoint
             # underneath it is the many-step teacher, whose schedule does not
@@ -2989,6 +3009,13 @@ class MiniMaxH3Pipeline(
 
         self._prepare_adaln_adapter(sampling)
         base_schedule, num_steps = self._resolve_sigma_positions(task, sampling)
+        hyperflow = self._hyperflow_for_task(task)
+        default_video_shift = (
+            float(hyperflow._hyperflow_video_shift) if hyperflow is not None else self.default_video_shift
+        )
+        default_audio_shift = (
+            float(hyperflow._hyperflow_audio_shift) if hyperflow is not None else self.default_audio_shift
+        )
         sampler = normalize_h3_sampler(extra.get("sampler"))
         if sampler != "euler" and base_schedule is not None:
             raise ValueError(
@@ -3074,8 +3101,8 @@ class MiniMaxH3Pipeline(
             "seed": int(sampling.seed if sampling.seed is not None else 42),
             "sampler": sampler,
             "num_steps": num_steps,
-            "video_shift": float(extra.get("flow_shift", self.default_video_shift)),
-            "audio_shift": float(extra.get("audio_flow_shift", self.default_audio_shift)),
+            "video_shift": float(extra.get("flow_shift", default_video_shift)),
+            "audio_shift": float(extra.get("audio_flow_shift", default_audio_shift)),
             "base_schedule": base_schedule,
             "num_outputs": _resolve_minimax_h3_num_outputs(sampling.num_outputs_per_prompt),
             "preencode_mp4": bool(extra.get("preencode_mp4", False)),
@@ -3345,6 +3372,11 @@ class MiniMaxH3Pipeline(
         schedules = [_minimax_h3_step_schedule(state) for state in batch_states]
         transformers = [state.extra[_STEP_TRANSFORMER] for state in batch_states]
         mixed_transformers = len({id(transformer) for transformer in transformers}) > 1
+        step_endpoints = (
+            [(schedule["r_video"], schedule["r_audio"]) for schedule in schedules]
+            if getattr(transformers[0], "_hyperflow_gate", None) is not None
+            else None
+        )
 
         video_rows: list[torch.Tensor] = []
         audio_rows: list[torch.Tensor] = []
@@ -3423,6 +3455,7 @@ class MiniMaxH3Pipeline(
                     audio_ref_cond_timestep=schedules[index]["audio_ref_cond_timestep"],
                     video_target_timesteps=video_target_timesteps[index],
                     audio_target_timesteps=audio_target_timesteps[index],
+                    endpoints=None if step_endpoints is None else step_endpoints[index],
                 )
                 request_video, request_audio = transformers[index](**forward_kwargs)
                 video_parts.append(request_video)
@@ -3440,6 +3473,7 @@ class MiniMaxH3Pipeline(
                 audio_ref_cond_timesteps=[schedule["audio_ref_cond_timestep"] for schedule in schedules],
                 video_target_timesteps=video_target_timesteps,
                 audio_target_timesteps=audio_target_timesteps,
+                endpoints=step_endpoints,
             )
             logger.debug(
                 "MiniMax H3 denoise step: %d request(s) packed into %d rows",

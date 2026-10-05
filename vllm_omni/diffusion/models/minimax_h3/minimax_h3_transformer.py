@@ -264,6 +264,7 @@ _FORWARD_SUPPORTED_KWARGS = frozenset(
         "audio_x",
         "img_position_ids",
         "unique_timesteps",
+        "unique_endpoints",
         "inverse_indices",
         "update_mask",
         "update_audio_mask",
@@ -1335,6 +1336,15 @@ class MiniMaxH3DiTModel(nn.Module):
             arch,
             prefix="time_embedder",
         )
+        # HyperFlow two-time conditioning (AnyFlow): an identically-shaped copy of the
+        # time embedder that scores each step's endpoint r. Both stay unset until an
+        # adapter is fused in ``_fuse_hyperflow_lora`` after the checkpoint weights
+        # load, so the base model is unchanged when no HyperFlow adapter is selected.
+        self.endpoint_time_embedder: MiniMaxH3TimeEmbedder | None = None
+        self._hyperflow_gate: float | None = None
+        self._hyperflow_sigmas: tuple[float, ...] | None = None
+        self._hyperflow_video_shift: float | None = None
+        self._hyperflow_audio_shift: float | None = None
         self.rope = MiniMaxH3Rope(arch.rope_inv_freq_len)
         self.token_refiner = MiniMaxH3TokenRefiner(
             arch,
@@ -1446,8 +1456,126 @@ class MiniMaxH3DiTModel(nn.Module):
         for name, buffer in self.named_buffers():
             if name in MINIMAX_H3_FP32_BUFFER_NAMES and buffer.dtype != _FP32_DTYPE:
                 raise ValueError(f"{name} must stay fp32 after load, got {buffer.dtype}.")
+        self._fuse_hyperflow_lora()
         self._fuse_turbo_lora()
         self._enable_mxfp8()
+
+    def _fuse_lora_deltas(self, grouped: dict[str, list[object]]) -> int:
+        """Add grouped LoRA deltas into their loaded linears, slicing for TP.
+
+        ``grouped`` maps a module path to the ordered entries whose deltas concatenate
+        into that module's weight rows (q/k/v into one ``qkv_proj``, one entry
+        elsewhere). Mirrors the turbo fuse: rebuild the delta on the accelerator and
+        add it when the shape matches, else push the full-width delta through the
+        module's own ``weight_loader`` so a tensor-parallel shard receives exactly the
+        slice the weights received.
+        """
+        fused = 0
+        for module_name, entries in grouped.items():
+            module = self.get_submodule(module_name)
+            weight = getattr(module, "weight", None)
+            if weight is None or not weight.numel():
+                raise ValueError(f"HyperFlow fuse: {module_name} has no weight to fuse into")
+            delta = torch.cat([_lora_delta(entry, device=weight.device) for entry in entries], dim=0).to(
+                dtype=weight.dtype
+            )
+            if tuple(delta.shape) == tuple(weight.shape):
+                weight.data.add_(delta)
+                del delta
+                fused += 1
+                continue
+            loader = getattr(weight, "weight_loader", None)
+            if loader is None:
+                raise ValueError(
+                    f"HyperFlow delta {tuple(delta.shape)} != {module_name} weight {tuple(weight.shape)} "
+                    "and no weight_loader to slice it"
+                )
+            original = weight.data.clone()
+            try:
+                if module_name.endswith(".mlp.fc1"):
+                    gate, up = delta.chunk(2, dim=0)
+                    loader(weight, gate, 0)
+                    loader(weight, up, 1)
+                else:
+                    loader(weight, delta)
+                delta_local = weight.data.clone()
+            finally:
+                weight.data.copy_(original)
+            if tuple(delta_local.shape) != tuple(weight.shape):
+                raise ValueError(
+                    f"HyperFlow delta sliced to {tuple(delta_local.shape)} does not match "
+                    f"{module_name} weight {tuple(weight.shape)}"
+                )
+            weight.data.add_(delta_local)
+            fused += 1
+        return fused
+
+    def _fuse_hyperflow_lora(self) -> None:
+        """Fuse a HyperFlow two-time adapter into the loaded weights.
+
+        HyperFlow's whole model-side change is the two-time embedder: ``time_embedder``
+        becomes ``emb_t(t) + gate * (emb_r(r) - emb_t(t))``. The endpoint embedder is an
+        exact copy of the loaded ``time_embedder`` (taken here, after the checkpoint
+        weights are in place), and the adapter's ``time_embedder`` /
+        ``endpoint_time_embedder`` deltas are fused into the two copies' fp32
+        ``proj_in``/``proj_out``. The block and token-refiner deltas fuse before MXFP8
+        packing, so the quantised forward sees them.
+        """
+        import copy
+
+        path = os.environ.get("H3_HYPERFLOW_LORA")
+        if not path:
+            return
+        from vllm_omni.diffusion.models.minimax_h3.lora import load_minimax_h3_hyperflow_lora
+
+        loaded = load_minimax_h3_hyperflow_lora(
+            partition=self._h3_partition,
+            lora_path=path,
+            dtype=_BF16_DTYPE,
+        )
+        if loaded is None:
+            raise ValueError(f"H3_HYPERFLOW_LORA={path} is not a recognisable HyperFlow adapter")
+        entries, spec = loaded
+
+        # The endpoint copy must predate the base embedder's delta so both start equal.
+        self.endpoint_time_embedder = copy.deepcopy(self.time_embedder)
+        self._hyperflow_gate = float(spec.gate)
+        self._hyperflow_sigmas = tuple(float(s) for s in spec.sigmas)
+        self._hyperflow_video_shift = float(spec.video_shift)
+        self._hyperflow_audio_shift = float(spec.audio_shift)
+
+        import re
+
+        packed: dict[str, dict[str, object]] = {}
+        plain: dict[str, list[object]] = {}
+        for module_name, weights in tuple(entries.items()):
+            match = re.match(r"^((?:token_refiner\.)?blocks\.\d+)\.attn\.to_(q|k|v)$", module_name)
+            if match:
+                packed.setdefault(f"{match.group(1)}.attn.qkv_proj", {})[match.group(2)] = weights
+                continue
+            plain.setdefault(module_name, []).append(weights)
+        for module_name, parts in packed.items():
+            if set(parts) != {"q", "k", "v"}:
+                raise ValueError(f"incomplete q/k/v adapter group for {module_name}: {sorted(parts)}")
+            plain[module_name] = [parts["q"], parts["k"], parts["v"]]
+
+        embedder = {
+            name: entries
+            for name, entries in plain.items()
+            if name.startswith(("time_embedder.", "endpoint_time_embedder."))
+        }
+        blocks = {name: entries for name, entries in plain.items() if name not in embedder}
+        fused_blocks = self._fuse_lora_deltas(blocks)
+        fused_embedder = self._fuse_lora_deltas(embedder)
+        if fused_embedder != len(embedder):
+            raise ValueError(f"H3_HYPERFLOW_LORA: only {fused_embedder}/{len(embedder)} time-embedder linears fused")
+        logger.info(
+            "MiniMax-H3 fused HyperFlow %s: %d block + %d time-embedder linears (gate %.4g)",
+            spec.filename,
+            fused_blocks,
+            fused_embedder,
+            self._hyperflow_gate,
+        )
 
     def _fuse_turbo_lora(self) -> None:
         """Add a distilled adapter's deltas into the wide linears before MXFP8 packing.
@@ -1830,6 +1958,7 @@ class MiniMaxH3DiTModel(nn.Module):
         audio_x: torch.Tensor,
         text_embeddings_selected: torch.Tensor,
         unique_timesteps: torch.Tensor,
+        unique_endpoints: torch.Tensor | None,
         img_pos: torch.Tensor,
         audio_pos: torch.Tensor,
         text_pos: torch.Tensor,
@@ -1911,6 +2040,14 @@ class MiniMaxH3DiTModel(nn.Module):
         )
 
         t_emb = self.time_embedder(unique_timesteps)
+        if self._hyperflow_gate is not None:
+            if unique_endpoints is None:
+                raise ValueError(
+                    "this MiniMax-H3 DiT has a HyperFlow adapter fused and needs the endpoint "
+                    "timesteps of every distinct timestep (unique_endpoints)"
+                )
+            r_emb = self.endpoint_time_embedder(unique_endpoints.view(-1).to(device))
+            t_emb = t_emb + self._hyperflow_gate * (r_emb - t_emb)
         return embeddings, t_emb
 
     def forward(self, **kwargs: Any) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1934,6 +2071,7 @@ class MiniMaxH3DiTModel(nn.Module):
         audio_x = _required_kwarg(kwargs, "audio_x")
         img_position_ids = _required_kwarg(kwargs, "img_position_ids")
         unique_timesteps = _required_kwarg(kwargs, "unique_timesteps")
+        unique_endpoints = kwargs.get("unique_endpoints")
         inverse_indices = _required_kwarg(kwargs, "inverse_indices").view(-1).to(torch.long)
         update_mask = _required_kwarg(kwargs, "update_mask")
         token_tags = _required_kwarg(kwargs, "token_tags").view(-1).to(torch.long)
@@ -1998,6 +2136,7 @@ class MiniMaxH3DiTModel(nn.Module):
             audio_x=audio_x,
             text_embeddings_selected=text_selected,
             unique_timesteps=unique_timesteps.view(-1).to(device),
+            unique_endpoints=None if unique_endpoints is None else unique_endpoints.view(-1).to(device),
             img_pos=img_pos.to(device),
             audio_pos=audio_pos.to(device),
             text_pos=text_pos.to(device),

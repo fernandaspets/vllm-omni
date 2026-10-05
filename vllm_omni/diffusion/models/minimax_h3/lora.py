@@ -12,6 +12,7 @@ Diffusers-PEFT exports are served. The native FlashGen contract lives in
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -336,3 +337,206 @@ def load_minimax_h3_turbo_lora(
         spec.audio_shift,
     )
     return lora_model, peft_helper, spec
+
+
+# ---------------------------------------------------------------------------
+# HyperFlow (two-time conditioning) adapter
+# ---------------------------------------------------------------------------
+_HYPERFLOW_KEY_RE = re.compile(r"^transformer\.(?P<module>.+)\.lora_(?P<matrix>[AB])\.weight$")
+_HYPERFLOW_TIME_TARGETS = (
+    "time_embedder.linear_1",
+    "time_embedder.linear_2",
+    "endpoint_time_embedder.linear_1",
+    "endpoint_time_embedder.linear_2",
+)
+_HYPERFLOW_TIME_DIMS = {
+    "time_embedder.linear_1": (256, _TURBO_HIDDEN_SIZE),
+    "time_embedder.linear_2": (_TURBO_HIDDEN_SIZE, 2688),
+    "endpoint_time_embedder.linear_1": (256, _TURBO_HIDDEN_SIZE),
+    "endpoint_time_embedder.linear_2": (_TURBO_HIDDEN_SIZE, 2688),
+}
+_HYPERFLOW_EXPECTED_RAW_TARGETS = frozenset(
+    f"{prefix}.{block_index}.{suffix}"
+    for prefix, block_count in (
+        ("transformer_blocks", 50),
+        ("token_refiner.refiner_blocks", 2),
+    )
+    for block_index in range(block_count)
+    for suffix in _TURBO_RAW_TARGET_SUFFIXES
+).union(_HYPERFLOW_TIME_TARGETS)
+_HYPERFLOW_WEIGHTS_MAPPER = WeightsMapper(
+    orig_to_new_substr={
+        "token_refiner.refiner_blocks.": "token_refiner.blocks.",
+        "transformer_blocks.": "blocks.",
+        ".attn.to_out.0.": ".attn.out_proj.",
+        ".ff.net.0.proj.": ".mlp.fc1.",
+        ".ff.net.2.": ".mlp.fc2.",
+        ".linear_1.": ".proj_in.",
+        ".linear_2.": ".proj_out.",
+    }
+)
+
+
+@dataclass(frozen=True)
+class HyperFlowSpec:
+    """The sampler contract a HyperFlow weights file declares."""
+
+    filename: str
+    rank: int
+    alpha: float
+    gate: float
+    sigmas: tuple[float, ...]
+    video_shift: float
+    audio_shift: float
+
+    @property
+    def denoise_steps(self) -> int:
+        return max(len(self.sigmas) - 1, 0)
+
+
+@dataclass(frozen=True)
+class _HyperFlowEntry:
+    """One module's LoRA A/B and effective scale; what ``_lora_delta`` consumes."""
+
+    lora_a: torch.Tensor
+    lora_b: torch.Tensor
+    scaling: float
+
+
+def _select_hyperflow_file(artifact_path: str | Path) -> Path | None:
+    path = Path(artifact_path)
+    if path.is_file():
+        return path if path.suffix == ".safetensors" else None
+    if not path.is_dir():
+        return None
+    candidates = []
+    for child in sorted(path.glob("*.safetensors")):
+        try:
+            with safe_open(child, framework="pt", device="cpu") as handle:
+                if str((handle.metadata() or {}).get("hyperflow", "")).lower() == "true":
+                    candidates.append(child)
+        except Exception:  # noqa: BLE001 - an unreadable header is just "not this file"
+            continue
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        raise ValueError(f"{path} holds {len(candidates)} HyperFlow artifacts; point H3_HYPERFLOW_LORA at one file.")
+    return None
+
+
+def _map_hyperflow_target(raw_target: str) -> str:
+    mapped = _HYPERFLOW_WEIGHTS_MAPPER.apply_list([f"{raw_target}.lora_A.weight"])[0]
+    return mapped[: -len(".lora_A.weight")]
+
+
+def load_minimax_h3_hyperflow_lora(
+    *,
+    partition: str,
+    lora_path: str | Path,
+    dtype: torch.dtype,
+) -> tuple[dict[str, _HyperFlowEntry], HyperFlowSpec] | None:
+    """Load a HyperFlow adapter into ``{lane_module_path: entry}`` for direct fusing.
+
+    HyperFlow's file is a native diffusers PEFT export: keys are
+    ``transformer.<module>.lora_A.weight`` / ``lora_B.weight`` with no ``.default.`` adapter
+    name, and its two extra targets are ``time_embedder`` and ``endpoint_time_embedder``,
+    whose ``linear_1``/``linear_2`` map onto the lane's ``proj_in``/``proj_out``.
+
+    The returned module paths are pre-``qkv``-packing (``blocks.N.attn.to_q`` etc.); the
+    transformer groups q/k/v into ``qkv_proj`` and fuses. The ``ff.net.0.proj`` B matrix is
+    reordered from diffusers' ``[value; gate]`` to the lane's fused ``fc1`` ``[gate; up]``.
+    """
+    lora_file = _select_hyperflow_file(lora_path)
+    if lora_file is None:
+        return None
+    with safe_open(lora_file, framework="pt", device="cpu") as checkpoint:
+        metadata = dict(checkpoint.metadata() or {})
+        if str(metadata.get("hyperflow", "")).lower() != "true":
+            return None
+        try:
+            alpha = float(metadata["lora_alpha"])
+            gate = float(metadata["hyperflow_gate"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"{lora_file.name} is missing HyperFlow lora_alpha/hyperflow_gate") from exc
+        sigmas = tuple(float(x) for x in json.loads(metadata["hyperflow_sigmas"]))
+        if len(sigmas) < 2:
+            raise ValueError(f"{lora_file.name} declares {len(sigmas)} sigma points, need >= 2")
+        rank = int(metadata["lora_rank"]) if "lora_rank" in metadata else 0
+
+        raw: dict[str, dict[str, torch.Tensor]] = {}
+        raw_seen: set[str] = set()
+        for name in checkpoint.keys():
+            match = _HYPERFLOW_KEY_RE.match(name)
+            if match is None:
+                raise ValueError(
+                    f"Unexpected key {name!r} in a HyperFlow file; expected "
+                    "`transformer.<module>.lora_A.weight` / `lora_B.weight`."
+                )
+            raw_target = match.group("module")
+            matrix = match.group("matrix")
+            raw_seen.add(raw_target)
+            raw.setdefault(raw_target, {})[matrix] = checkpoint.get_tensor(name)
+
+        missing = sorted(_HYPERFLOW_EXPECTED_RAW_TARGETS - raw_seen)
+        unexpected = sorted(raw_seen - _HYPERFLOW_EXPECTED_RAW_TARGETS)
+        if missing or unexpected:
+            raise ValueError(
+                f"HyperFlow target set does not match the published layout: missing={len(missing)} "
+                f"{missing[:5]}, unexpected={len(unexpected)} {unexpected[:5]}"
+            )
+
+        if rank <= 0:
+            first = next(iter(raw.values()))["A"]
+            rank = int(first.shape[0])
+        if not math.isfinite(alpha) or alpha <= 0:
+            raise ValueError(f"HyperFlow alpha must be a positive number, got {alpha!r}")
+
+        entries: dict[str, _HyperFlowEntry] = {}
+        for raw_target, matrices in raw.items():
+            if set(matrices) != {"A", "B"}:
+                raise ValueError(f"Incomplete HyperFlow LoRA pair for {raw_target}: {sorted(matrices)}")
+            a, b = matrices["A"], matrices["B"]
+            suffix = next((s for s in _TURBO_RAW_TARGET_SUFFIXES if raw_target.endswith(s)), None)
+            if suffix is not None:
+                input_dim, output_dim = _TURBO_TARGET_DIMS[suffix]
+            else:
+                input_dim, output_dim = _HYPERFLOW_TIME_DIMS[raw_target]
+            if tuple(a.shape) != (rank, input_dim) or tuple(b.shape) != (output_dim, rank):
+                raise ValueError(
+                    f"HyperFlow {raw_target} has shapes A={tuple(a.shape)} B={tuple(b.shape)}, "
+                    f"expected A=({rank}, {input_dim}) B=({output_dim}, {rank})"
+                )
+            if raw_target.endswith("ff.net.0.proj"):
+                # diffusers SwiGLU stores [value; gate]; the lane's fused fc1 is [gate; up].
+                value, gate_half = b.chunk(2, dim=0)
+                b = torch.cat((gate_half, value), dim=0).contiguous()
+            entries[_map_hyperflow_target(raw_target)] = _HyperFlowEntry(
+                lora_a=a.contiguous(),
+                lora_b=b.contiguous(),
+                scaling=alpha / rank,
+            )
+
+    spec = HyperFlowSpec(
+        filename=lora_file.name,
+        rank=rank,
+        alpha=alpha,
+        gate=gate,
+        sigmas=sigmas,
+        video_shift=float(metadata.get("hyperflow_video_shift", 12.0)),
+        audio_shift=float(metadata.get("hyperflow_audio_shift", 3.0)),
+    )
+    logger.info(
+        "MiniMax-H3 HyperFlow %s: %d targets, rank %d alpha %g, gate %g, %d steps (%d sigma points), shift %g/%g",
+        spec.filename,
+        len(entries),
+        spec.rank,
+        spec.alpha,
+        spec.gate,
+        spec.denoise_steps,
+        len(spec.sigmas),
+        spec.video_shift,
+        spec.audio_shift,
+    )
+    return entries, spec
+
+
