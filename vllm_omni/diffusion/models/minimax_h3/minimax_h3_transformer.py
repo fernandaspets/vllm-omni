@@ -1966,7 +1966,7 @@ class MiniMaxH3DiTModel(nn.Module):
         audio_x: torch.Tensor,
         text_embeddings_selected: torch.Tensor,
         unique_timesteps: torch.Tensor,
-        unique_endpoints: torch.Tensor | None,
+        unique_endpoints: torch.Tensor | None = None,
         img_pos: torch.Tensor,
         audio_pos: torch.Tensor,
         text_pos: torch.Tensor,
