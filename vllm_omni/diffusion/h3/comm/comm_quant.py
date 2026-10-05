@@ -1,8 +1,9 @@
 """Aligned block-int8 transport for the MiniMax-H3 Ulysses QKV exchange.
 
-The UE5M3 codec and the packet formats are ported from Sol-H3 (SGLang's MiniMax-H3 runtime,
-Apache-2.0). They are kept byte-compatible with it, so a packet produced here decodes with the
-upstream kernel.
+The UE5M3 packet format - 128-value vectors, group-32 finite-positive scale codes, and the
+144-byte output record - follows Sol-H3's ``h3_runtime/comm_quant.py``, which ships with
+NVlabs/Sana's sol-engine (Apache-2.0) alongside the SOL_ATTN backend this lane's attention path
+uses. The format is kept byte-compatible so a packet produced here decodes against that reference.
 """
 
 from __future__ import annotations
@@ -15,9 +16,8 @@ from .quant_kernels import _encode_ue5m3_int8
 
 VECTOR = 128
 # One output record carries one 128-wide attention head, four group-32
-# finite-positive UE5M3 scale codes, and twelve zero padding bytes. The record
-# is padded to 144 bytes (16-byte aligned) rather than the minimal 132, because
-# the unaligned layout costs more in the collective than the padding carries.
+# finite-positive UE5M3 scale codes, and twelve zero padding bytes, i.e. 144
+# bytes per 128 values (0.5625x the bf16 payload).
 OUTPUT_PACKET = 144
 VALUE_BIAS = 127
 OUTPUT_RECORDS_PER_PROGRAM = 16

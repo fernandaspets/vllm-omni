@@ -8,8 +8,8 @@ decode around the existing `all_to_all_single`, with every surrounding permute u
 
 At this packet size, int8/UE5M3 packets are 0.5625x bf16 bytes at rel ~4-6e-3; raw FP8 is 0.5000x at
 rel 5.2e-2, so int8 is the better trade and is the only mode wired here. Encoding and decoding add
-kernels on a step that is already launch-bound, so the byte saving only pays when the collective
-itself is wire-bound; the launch geometry is exposed for tuning.
+two full-tensor passes per exchange (~81 ms/step of kernels), so the byte saving only pays when the
+collective itself is wire-bound; the launch geometry is exposed for tuning.
 
     H3_A2A_WIRE=bf16|int8     (default bf16 -> unchanged code path, byte-identical clips)
     H3_A2A_WIRE_STATS=1       log byte/error stats on every call (default: first call only)
