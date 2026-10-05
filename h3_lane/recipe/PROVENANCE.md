@@ -81,3 +81,16 @@ EOF
 # the build proves its own payload (import gate + wire gate + runtime gate)
 bash build.sh h3-repro
 ```
+
+## Publication rule (2026-10-05)
+
+No pull request becomes ready-for-review, and no PR is opened non-draft, until the deliverable has
+passed an **end-to-end run as a stranger would consume it**: build from the public pins in this
+directory, boot the image, render the canary, and verify the artifact by bytes and sha256 against a
+recorded reference. Until then every PR stays a draft and its body says plainly what is not yet
+established.
+
+Rationale: on 2026-10-05 `local-inference-lab/b12x#480` was found open and publicly mergeable
+without that evidence, because the rule in `h3_lane/PR-FLOW.md` was treated as guidance rather than
+as a gate. Draft status is not a substitute - a draft is still visible, so a PR that has not been
+proven end to end should not exist at all unless the open thread itself is the point.
