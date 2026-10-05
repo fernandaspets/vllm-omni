@@ -1521,8 +1521,6 @@ class MiniMaxH3DiTModel(nn.Module):
         ``proj_in``/``proj_out``. The block and token-refiner deltas fuse before MXFP8
         packing, so the quantised forward sees them.
         """
-        import copy
-
         path = os.environ.get("H3_HYPERFLOW_LORA")
         if not path:
             return
@@ -1537,8 +1535,18 @@ class MiniMaxH3DiTModel(nn.Module):
             raise ValueError(f"H3_HYPERFLOW_LORA={path} is not a recognisable HyperFlow adapter")
         entries, spec = loaded
 
-        # The endpoint copy must predate the base embedder's delta so both start equal.
-        self.endpoint_time_embedder = copy.deepcopy(self.time_embedder)
+        # An identically-shaped copy of the loaded base embedder, built explicitly rather than
+        # deep-copied: vLLM's parallel linears carry loader callbacks that must not be cloned.
+        base = self.time_embedder
+        endpoint = MiniMaxH3TimeEmbedder(self.arch, prefix="endpoint_time_embedder").to(
+            device=base.proj_in.weight.device
+        )
+        with torch.no_grad():
+            endpoint.proj_in.weight.copy_(base.proj_in.weight)
+            endpoint.proj_in.bias.copy_(base.proj_in.bias)
+            endpoint.proj_out.weight.copy_(base.proj_out.weight)
+            endpoint.proj_out.bias.copy_(base.proj_out.bias)
+        self.endpoint_time_embedder = endpoint
         self._hyperflow_gate = float(spec.gate)
         self._hyperflow_sigmas = tuple(float(s) for s in spec.sigmas)
         self._hyperflow_video_shift = float(spec.video_shift)
