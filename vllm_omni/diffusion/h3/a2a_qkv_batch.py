@@ -6,9 +6,8 @@ four tensors are identically shaped (56 heads x 128, no GQA in this DiT), and `a
 only transposes the head (scatter) and sequence (gather) dims while dim 0 (batch) rides along
 untouched, so all four can be exchanged as one stacked batch.
 
-Equivalence is by construction (the element mapping per batch row is unchanged), and it was
-verified bit-identical against the stock quartet at the real geometry by
-test_a2a_qkv_batch.py: `exact=True maxabs=0.000e+00` in both directions.
+Equivalence is by construction: the element mapping per batch row is unchanged, so a bf16 batch is
+the concatenation of the four stock exchanges.
 
 Arm selection: H3_A2A_QKV_BATCH_CONTROL names a file holding 0/1 (default from
 H3_A2A_QKV_BATCH). The file is re-read at most once per second, so a boot can A/B both arms
@@ -17,8 +16,7 @@ without a restart, and a missing/unreadable file can only fall back to stock.
 Numerics note: under the int8 wire arm the batched call computes one activation scale for the
 stacked batch instead of one per tensor, so the int8 result is NOT bit-identical; the bf16 arm is.
 
-Imported through the env-gated branch inserted into
-vllm_omni/diffusion/attention/parallel/ulysses.py by patch_h3_a2a_qkv_batch.py.
+Imported through the env-gated branch in vllm_omni/diffusion/attention/parallel/ulysses.py.
 """
 
 from __future__ import annotations
@@ -36,7 +34,6 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["enabled", "batched_seq_a2a"]
 
-_CONTROL = os.environ.get("H3_A2A_QKV_BATCH_CONTROL", "")
 _CACHE_TTL = 1.0
 _cached: tuple[float, bool] | None = None
 _LOGGED: set = set()
@@ -49,9 +46,10 @@ def enabled() -> bool:
     if _cached is not None and now - _cached[0] < _CACHE_TTL:
         return _cached[1]
     flag = os.environ.get("H3_A2A_QKV_BATCH", "0") == "1"
-    if _CONTROL:
+    control = os.environ.get("H3_A2A_QKV_BATCH_CONTROL", "")
+    if control:
         try:
-            with open(_CONTROL) as fh:
+            with open(control) as fh:
                 flag = fh.read().strip() == "1"
         except OSError:
             flag = False  # unreadable control file can only ever mean stock

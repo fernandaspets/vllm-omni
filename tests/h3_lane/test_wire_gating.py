@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
-"""Gating and fallback contracts for the H3 lane's int8 wire modules.
+"""Gating and fallback contracts for the H3 int8 wire modules.
 
-The lane's safety argument for these modules is "off by default, and a failure falls back to
+The safety argument for these modules is "off by default, and a failure falls back to
 the original bf16 path, so a boot without the control files is byte-identical". That argument
 is only worth anything if it is enforced, so these tests pin it:
 
@@ -13,24 +13,23 @@ is only worth anything if it is enforced, so these tests pin it:
 - a failure **latches** the fallback, so a half-broken run cannot silently keep using a wire
   that already raised;
 - the disabled path calls the caller's own all-reduce instead of reimplementing it;
-- the intermediate-buffer pool defaults to **off**. The pooled variant was measured to corrupt
+- the intermediate-buffer pool defaults to **off**. The pooled variant corrupts
   the payload while reporting success (deterministic 26,410,165 B colour mosaic, ``exit 0``,
   ``a2a_failed=0``), so it must never be the default.
 
 Also pins the packet size the whole speed argument rests on: 144 bytes per 128 bf16 values
 (0.5625x), the byte ratio quoted in the module docstring.
 
-No GPU is required. The tests need the lane's ``port`` directory on ``PYTHONPATH``; otherwise
-they skip with that reason.
+No GPU is required.
 """
 
 from __future__ import annotations
 
 import pytest
+import torch
 
-h3_a2a_wire = pytest.importorskip("vllm_omni.diffusion.h3.a2a_wire", reason="H3 lane port dir is not on PYTHONPATH (lane-only module)")
-h3_ar_wire = pytest.importorskip("vllm_omni.diffusion.h3.ar_wire", reason="H3 lane port dir is not on PYTHONPATH")
-torch = pytest.importorskip("torch")
+from vllm_omni.diffusion.h3 import a2a_wire as h3_a2a_wire
+from vllm_omni.diffusion.h3 import ar_wire as h3_ar_wire
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
@@ -47,6 +46,8 @@ def _clean_env_and_state(monkeypatch):
         monkeypatch.delenv(var, raising=False)
     h3_a2a_wire._STATE["failed"] = False
     h3_ar_wire._STATE["failed"] = False
+    h3_a2a_wire._wire_cache["value"] = None
+    h3_ar_wire._wire_cache["value"] = None
     yield
 
 

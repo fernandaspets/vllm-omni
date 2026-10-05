@@ -1,4 +1,8 @@
-"""Shared Triton helpers for the H3 communication quantization kernels."""
+"""Shared Triton helpers for the quantised collectives.
+
+The UE5M3 encoder is ported from Sol-H3 (SGLang's MiniMax-H3 runtime, Apache-2.0); the wire format
+is theirs and is kept byte-compatible.
+"""
 
 from __future__ import annotations
 

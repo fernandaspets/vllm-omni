@@ -7,13 +7,13 @@ Scheme (world == 2):
 
     y = x_local + dequant(quant(x_peer))        # each rank keeps its own contribution exact
 
-so the error is only the peer's quantisation error. Measured at production shape (19877x5376):
-bf16 all_reduce 9.070 ms/call, int8 fused 5.794 ms/call -> -3.275 ms x 106 = -0.347 s/step,
-relative error 3.8e-3 (one bf16 rounding; the lane already runs E4M3 activations on this path).
+so the error is only the peer's quantisation error: one rounding of the peer's tensor, on a path
+that already runs quantised activations. The saving is in the collective, which is the largest single
+line in the step at this shape; measure it on the target wire rather than assuming it from a bench.
 
 Env:
     H3_AR_WIRE=int8|bf16        default bf16 (== the original behaviour, byte-identical)
-    H3_AR_WIRE_CONTROL=<path>   optional control file, read per call, for within-boot A/B
+    H3_AR_WIRE_CONTROL=<path>   optional control file, re-read at most once a second, for A/B in one boot
     H3_AR_WIRE_STATS=1          log every call
     H3_AR_WIRE_RPP / _WARPS     launch geometry (defaults 32 / 8; measured flat)
 
@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 
 import torch
 import torch.distributed as dist
@@ -43,7 +44,7 @@ def _log(msg: str) -> None:
     logger.info("%s %s", TAG, msg)
 
 
-def _wire() -> str:
+def _resolve_wire() -> str:
     path = os.environ.get("H3_AR_WIRE_CONTROL", "")
     if path:
         try:
@@ -56,6 +57,21 @@ def _wire() -> str:
         except Exception:
             pass
     return os.environ.get("H3_AR_WIRE", "bf16").strip().lower()
+
+
+_WIRE_TTL = 1.0
+_wire_cache: dict = {"t": 0.0, "value": None}
+
+
+def _wire() -> str:
+    """All-reduce mode; the control file is re-read at most once a second (see a2a_wire._wire)."""
+    now = time.monotonic()
+    cached = _wire_cache["value"]
+    if cached is not None and now - _wire_cache["t"] < _WIRE_TTL:
+        return cached
+    value = _resolve_wire()
+    _wire_cache["t"], _wire_cache["value"] = now, value
+    return value
 
 
 def enabled() -> bool:
@@ -93,11 +109,10 @@ _WS: dict = {}
 def _workspace(records: int, device, world: int):
     """One grow-to-max workspace per device, sliced per call: bounded resident memory.
 
-    Keyed by shape this was a memory leak in disguise - each distinct AR shape allocated its own
-    120 MB packet + 240 MB gather buffer on a worker that already has almost no headroom, and the
-    106 calls/step exhausted GPU 2 (measured: 274 MiB allocation failed with 111 MiB free on the
-    first `both` arm). One set, sized to the largest shape seen, keeps the cost at ~360 MB total
-    and still allocates nothing per call. Slices are contiguous, so the flat all-gather stays valid.
+    Keying this by shape leaked: each distinct all-reduce shape allocated its own packet and gather
+    buffers on workers that have almost no headroom, and the 106 calls per step exhausted the device
+    (a 274 MiB allocation failed with 111 MiB free). One set per device, sized to the largest shape
+    seen, allocates nothing per call; the slices stay contiguous, so the flat all-gather is valid.
     """
     key = (device.index, world)
     st = _WS.get(key)
@@ -187,11 +202,12 @@ def tp_all_reduce(x: torch.Tensor, original) -> torch.Tensor:
     `InternalTorchDynamoError: ValueError: Unknown format code 'f' for object of type 'str'`,
     which latched the fallback and silently served plain bf16 for the whole run.
     """
-    mode = "int8" if enabled() else "bf16"
+    on = enabled()
+    mode = "int8" if on else "bf16"
     if _STATE["logged_mode"] != mode:
         _STATE["logged_mode"] = mode
         _log(f"TP all-reduce mode -> {mode}")
-    if not enabled():
+    if not on:
         return original(x)
     try:
         return quant_reduce(x)
