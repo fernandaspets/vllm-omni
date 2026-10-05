@@ -67,7 +67,7 @@ from vllm_omni.transformers_utils.repo_utils import hf_api
 
 
 def _h3_prequant_manifest_keys() -> set[str]:
-    """Names the MiniMax-H3 pre-quantised loader released at construction (LOCAL ADDITION 2026-10-03).
+    """Names the MiniMax-H3 pre-quantised loader released at construction.
 
     H3_MX_PREQUANT stashes the stored e4m3 values and zero-sizes the wide bf16 projections, then
     rebuilds each one as an Mxfp8Linear, so those names never reach a weight_loader and look
@@ -1187,7 +1187,7 @@ class DiffusersPipelineLoader(HWRLoaderMixin):
             }
             weights_not_loaded = weights_not_loaded - weights_scale_not_loaded
             if weights_not_loaded:
-                # LOCAL ADDITION 2026-10-03: the MiniMax-H3 pre-quantised path releases the wide
+                # The MiniMax-H3 pre-quantised path releases the wide
                 # bf16 projections at construction and rebuilds each as an Mxfp8Linear from the
                 # stored e4m3 values, so those names never reach a weight_loader. They are not
                 # missing weights -- exempt exactly the manifest keys.

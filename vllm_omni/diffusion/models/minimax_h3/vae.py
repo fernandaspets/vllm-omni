@@ -365,29 +365,14 @@ class MiniMaxH3VideoVAE(nn.Module, DistributedVaeMixin):
         install_temporal_stream_patches(self.remote.model)
         self.model = self.remote.model
         # sm12x fast path ported from SGLang (unfused w2 bias); inert unless the H3_VAE_SM120
-        # control file selects a mode. This writes a file trace as well as logging, so a silent
-        # no-op cannot hide behind a logging level again.
-        try:
-            with open("/mnt/2king/build/h3/research/2026-10-03-step-profile/VAE_HOOK_TRACE", "a") as _t:
-                _t.write("hook entered\n")
-        except Exception:
-            pass
+        # control file selects a mode. The installer reports what it applied, so a silent no-op
+        # cannot hide behind a logging level.
         try:
             from vllm_omni.diffusion.h3.vae_sm120 import install_vae_sm120_fixes
 
-            _h3vae_ok = install_vae_sm120_fixes(self, device=device)
-            try:
-                with open("/mnt/2king/build/h3/research/2026-10-03-step-profile/VAE_HOOK_TRACE", "a") as _t:
-                    _t.write(f"install returned {_h3vae_ok}\n")
-            except Exception:
-                pass
+            install_vae_sm120_fixes(self, device=device)
         except Exception as _h3vae_exc:  # optional path: never fail model load
             logger.warning("h3_vae_sm120 not installed: %s", _h3vae_exc)
-            try:
-                with open("/mnt/2king/build/h3/research/2026-10-03-step-profile/VAE_HOOK_TRACE", "a") as _t:
-                    _t.write(f"install EXC {type(_h3vae_exc).__name__}: {_h3vae_exc}\n")
-            except Exception:
-                pass
         self._stager = None
         self._encoder_stager = None
         self._decoder_stager = None

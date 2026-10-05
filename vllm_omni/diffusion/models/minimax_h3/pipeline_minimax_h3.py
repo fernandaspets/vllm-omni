@@ -180,7 +180,7 @@ if TYPE_CHECKING:
 
 
 def _h3_step_profiler_factory():
-    """Env-gated per-step torch profiler (LOCAL ADDITION 2026-10-02).
+    """Env-gated per-step torch profiler.
 
     H3_STEP_PROFILE=1 profiles one denoise step and logs CUDA-time attribution;
     H3_STEP_PROFILE_STEP selects the step (default 1, avoiding first-call warmup).
@@ -232,14 +232,14 @@ def _h3_step_profiler_factory():
                 logger.info("H3_STEP_PROFILE trace -> %s", _path)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("H3_STEP_PROFILE trace export failed: %s", exc)
-        # LOCAL ADDITION 2026-10-03: with_modules=True in the profile above is what answers
+        # with_modules=True in the profile above is what answers
         # "which module owns this kernel" -- key_averages() then carries nn.Module entries, at a
         # tiny fraction of with_stack=True's cost (that one unwound Python stacks per op).
 
     return _prof
 
 
-# LOCAL ADDITION 2026-10-03: log-only per-stage timing. The denoise loop is already visible in
+# Log-only per-stage timing. The denoise loop is already visible in
 # tqdm, but the non-denoise part of a request (text/vision encode, VAE decode, mp4 mux) was one
 # opaque 4.5 s block. H3_STAGE_TIMING=1 wraps the pipeline's stage methods so each reports itself.
 def _h3_stage_timed(fn):
@@ -1463,7 +1463,7 @@ class MiniMaxH3Pipeline(
         group = get_tp_group()
         if group.world_size == text_encoder_tp_size:
             return group
-        # LOCAL ADDITION 2026-10-03: with tensor_parallel_size == 1 the TP group is a single
+        # With tensor_parallel_size == 1 the TP group is a single
         # rank, so asking for a wider encoder silently collapsed to one rank and put the whole
         # 63 GB Qwen3-VL encoder on rank 0 -- that is the TP1 x USP4 OOM. The encoder shards
         # over the first ``text_encoder_tp_size`` DiT ranks (see DiffusionParallelConfig), and
