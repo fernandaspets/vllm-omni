@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import logging
 import os
-import time
 
 import torch
 import torch.distributed as dist
@@ -45,42 +44,9 @@ _STATE = {"calls": 0, "fused_calls": 0, "failed": False}
 _POOL: dict[tuple, torch.Tensor] = {}
 
 
-def _resolve_wire() -> str:
-    path = os.environ.get("H3_A2A_WIRE_CONTROL", "")
-    if path:
-        try:
-            with open(path, encoding="utf-8") as fh:
-                value = fh.read().strip().lower()
-            if value:
-                return value
-        except FileNotFoundError:
-            pass
-        except Exception:  # never let a control-file read break the exchange
-            pass
-    return os.environ.get("H3_A2A_WIRE", "bf16").strip().lower()
-
-
-_WIRE_TTL = 1.0
-_wire_cache: dict = {"t": 0.0, "value": None}
-
-
 def _wire() -> str:
-    """Transport mode: env default, overridable at runtime by a control file.
-
-    Precedence: control file (if readable and non-empty) -> H3_A2A_WIRE -> "bf16".
-
-    The control file lets one boot switch arms without a restart, but this runs on every exchange
-    (200 per step), so it is re-read at most once a second rather than opened per call - the same
-    TTL the quantisation policy and the batched-qkv gate use. A missing or unreadable file always
-    resolves to bf16, so the stock path is the only failure mode.
-    """
-    now = time.monotonic()
-    cached = _wire_cache["value"]
-    if cached is not None and now - _wire_cache["t"] < _WIRE_TTL:
-        return cached
-    value = _resolve_wire()
-    _wire_cache["t"], _wire_cache["value"] = now, value
-    return value
+    """Transport mode, from ``H3_A2A_WIRE`` (default "bf16", the unchanged code path)."""
+    return os.environ.get("H3_A2A_WIRE", "bf16").strip().lower()
 
 
 # Both the stock int8 mode and the fused variant keep the NON-fused directions (notably the

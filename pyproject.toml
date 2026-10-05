@@ -226,6 +226,8 @@ ignore = [
 # still apply to these files.
 "vllm_omni/diffusion/models/minimax_h3/a2a_wire.py" = ["N803", "N814"]
 "vllm_omni/diffusion/models/minimax_h3/a2a_qkv_batch.py" = ["N803", "N814"]
+"vllm_omni/diffusion/models/minimax_h3/ar_wire.py" = ["N803", "N814"]
+"vllm_omni/diffusion/models/minimax_h3/comm/*.py" = ["N803", "N814"]
 "examples/**" = ["E501"]  # Allow long lines in examples
 "tests/**" = ["E501"]  # Allow long lines in tests
 # MiniCPM-o reference modeling code vendored from upstream HF/transformers/MiniCPM-o.

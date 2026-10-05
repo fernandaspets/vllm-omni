@@ -3,11 +3,11 @@
 """Gating and fallback contracts for the H3 int8 wire modules.
 
 The safety argument for these modules is "off by default, and a failure falls back to
-the original bf16 path, so a boot without the control files is byte-identical". That argument
+the original bf16 path, so a boot with the arms off is byte-identical". That argument
 is only worth anything if it is enforced, so these tests pin it:
 
-- control-file precedence over the environment variable, and the fallbacks when the control
-  file is missing, empty or unreadable;
+- the arm comes only from its own environment variable, and the control-file environment
+  variables these modules used to read are inert;
 - which mode strings actually enable int8 (the a2a module also accepts the fused spellings;
   the all-reduce module accepts exactly ``int8``);
 - a failure **latches** the fallback, so a half-broken run cannot silently keep using a wire
@@ -36,18 +36,10 @@ pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
 @pytest.fixture(autouse=True)
 def _clean_env_and_state(monkeypatch):
-    for var in (
-        "H3_A2A_WIRE",
-        "H3_A2A_WIRE_CONTROL",
-        "H3_A2A_WIRE_BUFCACHE",
-        "H3_AR_WIRE",
-        "H3_AR_WIRE_CONTROL",
-    ):
+    for var in ("H3_A2A_WIRE", "H3_A2A_WIRE_BUFCACHE", "H3_AR_WIRE"):
         monkeypatch.delenv(var, raising=False)
     h3_a2a_wire._STATE["failed"] = False
     h3_ar_wire._STATE["failed"] = False
-    h3_a2a_wire._wire_cache["value"] = None
-    h3_ar_wire._wire_cache["value"] = None
     yield
 
 
@@ -59,24 +51,16 @@ def test_a2a_defaults_to_bf16_when_nothing_is_set():
     assert h3_a2a_wire.wire_enabled() is False
 
 
-def test_a2a_control_file_wins_over_the_env(monkeypatch, tmp_path):
-    control = tmp_path / "A2A_WIRE_MODE"
-    control.write_text("int8\n")
-    monkeypatch.setenv("H3_A2A_WIRE_CONTROL", str(control))
+def test_control_file_envs_are_inert(monkeypatch, tmp_path):
+    """The control-file plane is gone: these variables must not select an arm."""
+    for name in ("H3_A2A_WIRE_CONTROL", "H3_AR_WIRE_CONTROL"):
+        control = tmp_path / name
+        control.write_text("int8\n")
+        monkeypatch.setenv(name, str(control))
     monkeypatch.setenv("H3_A2A_WIRE", "bf16")
-    assert h3_a2a_wire._wire() == "int8"
-    assert h3_a2a_wire.wire_enabled() is True
-
-
-def test_a2a_blank_or_missing_control_file_falls_back_to_the_env(monkeypatch, tmp_path):
-    blank = tmp_path / "A2A_WIRE_MODE"
-    blank.write_text("  \n")
-    monkeypatch.setenv("H3_A2A_WIRE_CONTROL", str(blank))
-    monkeypatch.setenv("H3_A2A_WIRE", "int8")
-    assert h3_a2a_wire._wire() == "int8"
-
-    monkeypatch.setenv("H3_A2A_WIRE_CONTROL", str(tmp_path / "absent"))
-    assert h3_a2a_wire._wire() == "int8"
+    monkeypatch.setenv("H3_AR_WIRE", "bf16")
+    assert h3_a2a_wire.wire_enabled() is False
+    assert h3_ar_wire.enabled() is False
 
 
 @pytest.mark.parametrize("mode", ["int8", "int8-fused", "int8_fused", "fused", "INT8"])
@@ -106,14 +90,6 @@ def test_a2a_buffer_pool_defaults_to_off(monkeypatch):
 def test_ar_defaults_to_bf16_when_nothing_is_set():
     assert h3_ar_wire._wire() == "bf16"
     assert h3_ar_wire.enabled() is False
-
-
-def test_ar_control_file_wins_over_the_env(monkeypatch, tmp_path):
-    control = tmp_path / "AR_WIRE_MODE"
-    control.write_text("int8\n")
-    monkeypatch.setenv("H3_AR_WIRE_CONTROL", str(control))
-    monkeypatch.setenv("H3_AR_WIRE", "bf16")
-    assert h3_ar_wire.enabled() is True
 
 
 def test_ar_accepts_only_exact_int8(monkeypatch):

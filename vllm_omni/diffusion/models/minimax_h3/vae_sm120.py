@@ -15,8 +15,7 @@ sm90/sm100/sm103 only, so `resolve_h3_vae_operators()` returns None on sm12x and
 `install_h3_vae_optimizations()` returns False - which is also why the fp16 block-linear persistence
 that function performs elsewhere never happens here.
 
-Modes (`H3_VAE_SM120_CONTROL` file, re-read at most once per second; `H3_VAE_SM120` env is the
-fallback; missing/unreadable always means stock):
+Modes (`H3_VAE_SM120`; unset or unparseable always means stock):
   0  stock (wrappers may be installed but always delegate)
   1  unfused `w2`: `matmul(x, w.t()) + bias` on CUDA when dtypes line up
   2  mode 1 plus one-time fp16 materialization of the decoder-block Linear weights
@@ -32,7 +31,6 @@ bit-identical with, the fused form); mode 2 additionally changes weight storage 
 from __future__ import annotations
 
 import os
-import time
 import weakref
 
 import torch
@@ -46,10 +44,7 @@ except Exception:  # pragma: no cover
 
     logger = logging.getLogger(__name__)
 
-# No machine-specific default: the control file is opt-in via the environment.
-_CONTROL_PATH = os.environ.get("H3_VAE_SM120_CONTROL", "")
-_TTL_SECONDS = 1.0
-_MODE_CACHE: dict[str, object] = {"at": 0.0, "mode": 0}
+# Opt-in via H3_VAE_SM120; no machine-specific default.
 _LOGGED_MODES: set[int] = set()
 _OWNER_OF: dict[int, weakref.ReferenceType[torch.nn.Module]] = {}
 _LINEAR_ATTRS = ("to_qkv", "to_out", "w1", "w2")
@@ -72,24 +67,12 @@ def _is_sm12x(device) -> bool:
 
 
 def _resolve_mode() -> int:
-    now = time.monotonic()
-    if now - float(_MODE_CACHE["at"]) <= _TTL_SECONDS:
-        return int(_MODE_CACHE["mode"])  # type: ignore[arg-type]
-    mode = 0
-    if _CONTROL_PATH:
-        try:
-            with open(_CONTROL_PATH, encoding="utf-8") as handle:
-                mode = int(handle.read().strip() or "0")
-        except (OSError, ValueError):
-            mode = 0
-    else:
-        try:
-            mode = int(os.environ.get("H3_VAE_SM120", "0"))
-        except ValueError:
-            mode = 0
-    mode = mode if mode in (1, 2) else 0
-    _MODE_CACHE.update(at=now, mode=mode)
-    return mode
+    """Decoder mode from ``H3_VAE_SM120`` (0 = untouched, 1/2 = the two fix sets)."""
+    try:
+        mode = int(os.environ.get("H3_VAE_SM120", "0"))
+    except ValueError:
+        mode = 0
+    return mode if mode in (1, 2) else 0
 
 
 def _find_feed_forwards(root: torch.nn.Module) -> list[torch.nn.Module]:
@@ -209,7 +192,7 @@ def install_vae_sm120_fixes(target, *, device=None) -> bool:
         len(feed_forwards),
         type(root).__name__,
         resolved_device,
-        _CONTROL_PATH or "<env H3_VAE_SM120>",
+        "<env H3_VAE_SM120>",
     )
     return wrapped > 0
 
