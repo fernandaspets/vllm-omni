@@ -28,8 +28,8 @@ from __future__ import annotations
 import pytest
 import torch
 
-from vllm_omni.diffusion.h3 import a2a_wire as h3_a2a_wire
-from vllm_omni.diffusion.h3 import ar_wire as h3_ar_wire
+from vllm_omni.diffusion.models.minimax_h3 import a2a_wire as h3_a2a_wire
+from vllm_omni.diffusion.models.minimax_h3 import ar_wire as h3_ar_wire
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
@@ -156,7 +156,7 @@ def test_ar_disabled_path_is_taken_when_the_wire_has_failed(monkeypatch):
 
 
 def test_packet_is_0_5625x_of_the_bf16_payload():
-    from vllm_omni.diffusion.h3.comm.comm_quant import OUTPUT_PACKET, VECTOR
+    from vllm_omni.diffusion.models.minimax_h3.comm.comm_quant import OUTPUT_PACKET, VECTOR
 
     assert VECTOR == 128
     assert OUTPUT_PACKET == 144

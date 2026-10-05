@@ -18,7 +18,7 @@ import math
 import pytest
 import torch
 
-from vllm_omni.diffusion.h3 import a2a_wire as h3_a2a_wire
+from vllm_omni.diffusion.models.minimax_h3 import a2a_wire as h3_a2a_wire
 
 if not torch.cuda.is_available():  # pragma: no cover - hardware gate
     pytest.skip("CUDA is not available", allow_module_level=True)

@@ -160,7 +160,7 @@ class Mxfp8Linear:
             from vllm.distributed import tensor_model_parallel_all_reduce
 
             try:
-                from vllm_omni.diffusion.h3 import ar_wire as h3_ar_wire
+                from . import ar_wire as h3_ar_wire
 
                 out = h3_ar_wire.tp_all_reduce(out, tensor_model_parallel_all_reduce)
             except Exception:
