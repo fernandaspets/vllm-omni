@@ -194,19 +194,44 @@ def _h3_step_profiler_factory():
         if step != target:
             yield
             return
+        _stack = os.environ.get("H3_STEP_PROFILE_STACK", "0") == "1"
+        _shapes = os.environ.get("H3_STEP_PROFILE_SHAPES", "0") == "1"
         with torch.profiler.profile(
             activities=[
                 torch.profiler.ProfilerActivity.CPU,
                 torch.profiler.ProfilerActivity.CUDA,
             ],
             with_modules=True,
+            with_stack=_stack,
+            record_shapes=_shapes,
         ) as prof:
             yield
-        logger.info(
-            "H3_STEP_PROFILE step=%d\n%s",
-            step,
-            prof.key_averages().table(sort_by="cuda_time_total", row_limit=30),
-        )
+        if os.environ.get("H3_STEP_PROFILE_TRACE"):
+            logger.info(
+                "H3_STEP_PROFILE step=%d stack=%s shapes=%s (table skipped: trace export)",
+                step,
+                _stack,
+                _shapes,
+            )
+        else:
+            logger.info(
+                "H3_STEP_PROFILE step=%d stack=%s shapes=%s\n%s",
+                step,
+                _stack,
+                _shapes,
+                prof.key_averages().table(sort_by="cuda_time_total", row_limit=200 if _stack or _shapes else 30),
+            )
+        _trace = os.environ.get("H3_STEP_PROFILE_TRACE")
+        if _trace:
+            try:
+                _path = _trace.replace("%d", str(os.getpid())) if "%d" in _trace else f"{_trace}.{os.getpid()}"
+                _dir = os.path.dirname(_path)
+                if _dir:
+                    os.makedirs(_dir, exist_ok=True)
+                prof.export_chrome_trace(_path)
+                logger.info("H3_STEP_PROFILE trace -> %s", _path)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("H3_STEP_PROFILE trace export failed: %s", exc)
         # LOCAL ADDITION 2026-10-03: with_modules=True in the profile above is what answers
         # "which module owns this kernel" -- key_averages() then carries nn.Module entries, at a
         # tiny fraction of with_stack=True's cost (that one unwound Python stacks per op).

@@ -13,6 +13,19 @@ from vllm.logger import init_logger
 from vllm_omni.diffusion.attention.backends.abstract import AttentionMetadata
 from vllm_omni.diffusion.attention.parallel.base import ParallelAttentionContext
 from vllm_omni.diffusion.distributed.comm import SeqAllToAll4D
+
+try:  # H3 a2a qkv batching (env-gated, default off; port dir on PYTHONPATH)
+    from h3_a2a_qkv_batch import batched_seq_a2a as _h3_a2a_qkv_batch
+    from h3_a2a_qkv_batch import enabled as _h3_a2a_qkv_batch_enabled
+except Exception:  # pragma: no cover - stock behaviour without the port module
+
+    def _h3_a2a_qkv_batch_enabled() -> bool:
+        return False
+
+    def _h3_a2a_qkv_batch(*args, **kwargs):
+        raise RuntimeError("h3_a2a_qkv_batch is not importable")
+
+
 from vllm_omni.diffusion.distributed.group_coordinator import SequenceParallelGroupCoordinator
 from vllm_omni.diffusion.forward_context import (
     get_forward_context,
@@ -535,17 +548,28 @@ class UlyssesParallelAttention:
                 if gate_compress is not None:
                     gate_compress = ulysses_qkv_fwd(gate_compress, group_name, ulysses_world_size)
             else:
-                query = SeqAllToAll4D.apply(
-                    self._ulysses_pg, query, self._scatter_idx, self._gather_idx, self._use_sync
-                )
-                key = SeqAllToAll4D.apply(self._ulysses_pg, key, self._scatter_idx, self._gather_idx, self._use_sync)
-                value = SeqAllToAll4D.apply(
-                    self._ulysses_pg, value, self._scatter_idx, self._gather_idx, self._use_sync
-                )
-                if gate_compress is not None:
-                    gate_compress = SeqAllToAll4D.apply(
-                        self._ulysses_pg, gate_compress, self._scatter_idx, self._gather_idx, self._use_sync
+                if _h3_a2a_qkv_batch_enabled():
+                    _h3_batch = [query, key, value] + ([gate_compress] if gate_compress is not None else [])
+                    _h3_res = _h3_a2a_qkv_batch(
+                        self._ulysses_pg, _h3_batch, self._scatter_idx, self._gather_idx, self._use_sync
                     )
+                    query, key, value = _h3_res[0], _h3_res[1], _h3_res[2]
+                    if gate_compress is not None:
+                        gate_compress = _h3_res[3]
+                else:
+                    query = SeqAllToAll4D.apply(
+                        self._ulysses_pg, query, self._scatter_idx, self._gather_idx, self._use_sync
+                    )
+                    key = SeqAllToAll4D.apply(
+                        self._ulysses_pg, key, self._scatter_idx, self._gather_idx, self._use_sync
+                    )
+                    value = SeqAllToAll4D.apply(
+                        self._ulysses_pg, value, self._scatter_idx, self._gather_idx, self._use_sync
+                    )
+                    if gate_compress is not None:
+                        gate_compress = SeqAllToAll4D.apply(
+                            self._ulysses_pg, gate_compress, self._scatter_idx, self._gather_idx, self._use_sync
+                        )
             seq_lens = []
             local_seq_len = 0
             orig_head_cnt = 0

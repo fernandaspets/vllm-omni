@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 
 from __future__ import annotations
+import os
 
 from vllm.logger import init_logger
 
@@ -45,7 +46,7 @@ def build_parallel_attention_strategy(
     ulysses_degree = getattr(p, "ulysses_degree", 1)
     ring_degree = getattr(p, "ring_degree", 1)
     allgather_degree = getattr(p, "allgather_degree", 1)
-    ulysses_a2a_permute = getattr(p, "ulysses_a2a_permute", False)
+    ulysses_a2a_permute = getattr(p, "ulysses_a2a_permute", False) or (os.environ.get("H3_A2A_PERMUTE", "0") == "1")
 
     sp_configured = ulysses_degree > 1 or ring_degree > 1 or allgather_degree > 1
     if not sp_configured:
