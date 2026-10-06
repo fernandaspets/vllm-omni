@@ -9,9 +9,7 @@ untouched, so all four can be exchanged as one stacked batch.
 Equivalence is by construction: the element mapping per batch row is unchanged, so a bf16 batch is
 the concatenation of the four stock exchanges.
 
-Arm selection: H3_A2A_QKV_BATCH_CONTROL names a file holding 0/1 (default from
-H3_A2A_QKV_BATCH). The file is re-read at most once per second, so a boot can A/B both arms
-without a restart, and a missing/unreadable file can only fall back to stock.
+Arm selection: H3_A2A_QKV_BATCH=1 (default off).
 
 Numerics note: under the int8 wire arm the batched call computes one activation scale for the
 stacked batch instead of one per tensor, so the int8 result is NOT bit-identical; the bf16 arm is.
@@ -23,7 +21,6 @@ from __future__ import annotations
 
 import logging
 import os
-import time
 from collections.abc import Sequence
 
 import torch
@@ -34,27 +31,12 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["enabled", "batched_seq_a2a", "install"]
 
-_CACHE_TTL = 1.0
-_cached: tuple[float, bool] | None = None
 _LOGGED: set = set()
 
 
 def enabled() -> bool:
-    """True when batching is selected (control file first, else H3_A2A_QKV_BATCH)."""
-    global _cached
-    now = time.monotonic()
-    if _cached is not None and now - _cached[0] < _CACHE_TTL:
-        return _cached[1]
-    flag = os.environ.get("H3_A2A_QKV_BATCH", "0") == "1"
-    control = os.environ.get("H3_A2A_QKV_BATCH_CONTROL", "")
-    if control:
-        try:
-            with open(control) as fh:
-                flag = fh.read().strip() == "1"
-        except OSError:
-            flag = False  # unreadable control file can only ever mean stock
-    _cached = (now, flag)
-    return flag
+    """True when batching is selected, from ``H3_A2A_QKV_BATCH`` (default off)."""
+    return os.environ.get("H3_A2A_QKV_BATCH", "0") == "1"
 
 
 def _note_engaged(n: int, shape: Sequence[int]) -> None:

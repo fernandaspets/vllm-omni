@@ -1583,11 +1583,11 @@ class MiniMaxH3DiTModel(nn.Module):
         """
         if not _mxfp8_enabled():
             return
-        # --- dynamic per-role quant policy (h3_quant_policy) ---
-        # Both linear classes are imported explicitly and chosen PER ROLE (mlp/attn/refiner)
-        # by h3_quant_policy, which reads the control file H3_QUANT_POLICY_CONTROL.
-        # 'bf16' means "do not swap": the DiT forward already falls back to the original
-        # vLLM linear when self._mx_* is None, and the free loop below skips such roles.
+        # Per-role precision for the wide DiT linears. The MLP carries most of the linear
+        # work, so fc1/fc2 take NVFP4 when that arm is enabled, the attention projections
+        # stay higher precision, and any other leaf is left as the original vLLM linear
+        # ("bf16" here means "do not swap"). The arms themselves are selected by
+        # VLLM_OMNI_DIT_MXFP8 / VLLM_OMNI_DIT_NVFP4; there is no separate policy file.
         import os as _os
 
         from vllm_omni.diffusion.models.minimax_h3.b12x_mxfp8 import (
@@ -1607,13 +1607,12 @@ class MiniMaxH3DiTModel(nn.Module):
             # 2.13x on the four linears at M=19904 (in-tree package, no PYTHONPATH needed).
             from .nvfp4 import Nvfp4Linear as _Nvfp4Cls
             from .nvfp4 import prepare_shared as _nvfp4_prepare
-        from .quant_policy import describe as _quant_describe
-        from .quant_policy import policy_for as _policy_for
+        _ROLE_DTYPE = {"qkv_proj": "mxfp8", "out_proj": "mxfp8", "fc1": "nvfp4", "fc2": "nvfp4"}
 
-        logger.info("MiniMax-H3 quant: %s", _quant_describe())
+        logger.info("MiniMax-H3 quant: mlp=nvfp4 attn=mxfp8 refiner=bf16")
 
         def _cls_for(leaf: str):
-            pol = _policy_for(leaf)
+            pol = _ROLE_DTYPE.get(leaf, "bf16")
             if pol == "bf16":
                 return None
             if pol == "nvfp4":
@@ -1708,7 +1707,7 @@ class MiniMaxH3DiTModel(nn.Module):
         logger.info(
             "MiniMax-H3 quant: %s | mxfp8=%d (%d shapes) nvfp4=%d (%d shapes) "
             "bf16_roles=%d checkpoint=%d freed=%.1f GiB",
-            _quant_describe(),
+            "mlp=nvfp4 attn=mxfp8 refiner=bf16",
             len(mxfp8_mods),
             len(prepared),
             len(nvfp4_mods),

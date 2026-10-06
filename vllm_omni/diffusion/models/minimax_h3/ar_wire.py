@@ -14,7 +14,6 @@ collective is cheaper than the isolated benchmark predicts.
 
 Env:
     H3_AR_WIRE=int8|bf16        default bf16 (== the original behaviour, byte-identical)
-    H3_AR_WIRE_CONTROL=<path>   optional control file, re-read at most once a second, for A/B in one boot
     H3_AR_WIRE_STATS=1          log every call
     H3_AR_WIRE_RPP / _WARPS     launch geometry (defaults 32 / 8; measured flat)
 
@@ -26,7 +25,6 @@ from __future__ import annotations
 
 import logging
 import os
-import time
 
 import torch
 import torch.distributed as dist
@@ -45,34 +43,9 @@ def _log(msg: str) -> None:
     logger.info("%s %s", TAG, msg)
 
 
-def _resolve_wire() -> str:
-    path = os.environ.get("H3_AR_WIRE_CONTROL", "")
-    if path:
-        try:
-            with open(path, encoding="utf-8") as fh:
-                value = fh.read().strip().lower()
-            if value:
-                return value
-        except FileNotFoundError:
-            pass
-        except Exception:
-            pass
-    return os.environ.get("H3_AR_WIRE", "bf16").strip().lower()
-
-
-_WIRE_TTL = 1.0
-_wire_cache: dict = {"t": 0.0, "value": None}
-
-
 def _wire() -> str:
-    """All-reduce mode; the control file is re-read at most once a second (see a2a_wire._wire)."""
-    now = time.monotonic()
-    cached = _wire_cache["value"]
-    if cached is not None and now - _wire_cache["t"] < _WIRE_TTL:
-        return cached
-    value = _resolve_wire()
-    _wire_cache["t"], _wire_cache["value"] = now, value
-    return value
+    """All-reduce mode, from ``H3_AR_WIRE`` (default "bf16", the unchanged code path)."""
+    return os.environ.get("H3_AR_WIRE", "bf16").strip().lower()
 
 
 def enabled() -> bool:
