@@ -68,7 +68,7 @@ def _run_wire_exchange(local_rank: int, world_size: int, mode: str, master_port:
         }
     )
     from vllm_omni.diffusion.distributed.comm import all_to_all_4D, register_seq_all_to_all_backend
-    from vllm_omni.diffusion.h3 import a2a_wire
+    from vllm_omni.diffusion.models.minimax_h3 import a2a_wire
 
     device = torch.device(f"{current_omni_platform.device_type}:{local_rank}")
     current_omni_platform.set_device(device)

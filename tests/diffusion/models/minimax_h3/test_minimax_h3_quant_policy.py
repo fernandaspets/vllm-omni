@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
-"""Unit tests for the H3 lane's per-role quantisation policy (``vllm_omni.diffusion.h3.quant_policy``).
+"""Unit tests for the H3 lane's per-role quantisation policy (``vllm_omni.diffusion.models.minimax_h3.quant_policy``).
 
 The policy decides, per role, whether a wide DiT linear is swapped to NVFP4, kept at MXFP8,
 or left as the original bf16 linear. Two failure modes were observed on the lane and are
@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import pytest
 
-from vllm_omni.diffusion.h3 import quant_policy as h3_quant_policy
+from vllm_omni.diffusion.models.minimax_h3 import quant_policy as h3_quant_policy
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 

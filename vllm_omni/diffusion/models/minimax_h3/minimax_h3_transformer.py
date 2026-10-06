@@ -1457,8 +1457,8 @@ class MiniMaxH3DiTModel(nn.Module):
         its own transports here. Both are opt-in and default off, so a stock run is
         unchanged (the wire resolves to bf16, the qkv batching is disabled).
         """
-        from vllm_omni.diffusion.h3.a2a_qkv_batch import install as install_qkv_batch
-        from vllm_omni.diffusion.h3.a2a_wire import install as install_a2a_wire
+        from .a2a_qkv_batch import install as install_qkv_batch
+        from .a2a_wire import install as install_a2a_wire
 
         install_a2a_wire()
         install_qkv_batch()
@@ -1605,10 +1605,10 @@ class MiniMaxH3DiTModel(nn.Module):
         if _nvfp4_ready:
             # NVFP4 (W4A4): same b12x op, FP4 weight, per-call activation global scale.
             # 2.13x on the four linears at M=19904 (in-tree package, no PYTHONPATH needed).
-            from vllm_omni.diffusion.h3.nvfp4 import Nvfp4Linear as _Nvfp4Cls
-            from vllm_omni.diffusion.h3.nvfp4 import prepare_shared as _nvfp4_prepare
-        from vllm_omni.diffusion.h3.quant_policy import describe as _quant_describe
-        from vllm_omni.diffusion.h3.quant_policy import policy_for as _policy_for
+            from .nvfp4 import Nvfp4Linear as _Nvfp4Cls
+            from .nvfp4 import prepare_shared as _nvfp4_prepare
+        from .quant_policy import describe as _quant_describe
+        from .quant_policy import policy_for as _policy_for
 
         logger.info("MiniMax-H3 quant: %s", _quant_describe())
 

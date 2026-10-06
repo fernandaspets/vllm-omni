@@ -368,7 +368,7 @@ class MiniMaxH3VideoVAE(nn.Module, DistributedVaeMixin):
         # control file selects a mode. The installer reports what it applied, so a silent no-op
         # cannot hide behind a logging level.
         try:
-            from vllm_omni.diffusion.h3.vae_sm120 import install_vae_sm120_fixes
+            from .vae_sm120 import install_vae_sm120_fixes
 
             install_vae_sm120_fixes(self, device=device)
         except Exception as _h3vae_exc:  # optional path: never fail model load
