@@ -5,10 +5,10 @@ A sibling of ``vllm_omni.diffusion.models.minimax_h3.b12x_mxfp8`` (``Mxfp8Linear
 ``prepare_shared``) with the same contract, so the model's single construction site can select it
 with an env-gated import alias. It uses the *same* b12x op the DiT already runs
 (``b12x::blockscaled_bf16``, via ``blockscaled.mm`` with a bf16 source), which quantises the
-activation internally; the differences are only that the weight is packed NVFP4 and that we hand
+activation internally; the differences are only that the weight is packed NVFP4 and that the call hands
 the op a per-call activation global scale.
 
-Measured on lane GPU 0, M=19904, eager, isolated: the four linears together run 13.929 ms in MXFP8
+Measured at M=19904, eager, isolated: the four linears together run 13.929 ms in MXFP8
 and 6.540 ms in NVFP4 (2.13x, 944-1284 TFLOP/s), i.e. about -370 ms/step over the 50 blocks. Mean
 relative error against a bf16 reference rises from 3.8e-2 to 1.35e-1. Receipts:
 ``profile/sparse-attn-01/fp4/FINDINGS-nvfp4.md`` and ``fp4/fp4_vs_mxfp8.py``.
@@ -18,11 +18,15 @@ Global-scale convention (derived empirically, ``fp4/fp4_gemm_test.py``): b12x "r
 ``1/G``. With ``global_scale_kind='multiplier'`` and the same G the output came out exactly G^2 too
 large, which is how the convention was identified.
 """
+
 from __future__ import annotations
 
+import logging
 import os
 
 import torch
+
+logger = logging.getLogger(__name__)
 
 _CAPACITY_STEP = 4096
 _DEFAULT_CAPACITY = 40960
@@ -110,8 +114,9 @@ def _values_scales(packed) -> tuple[torch.Tensor, torch.Tensor]:
 class Nvfp4Linear:
     """Drop-in for a locally-sharded linear ``weight [out, in]`` on b12x NVFP4 (W4A4)."""
 
-    def __init__(self, weight: torch.Tensor, *, name: str = "h3-linear", reduce: bool = False,
-                 bias: torch.Tensor | None = None):
+    def __init__(
+        self, weight: torch.Tensor, *, name: str = "h3-linear", reduce: bool = False, bias: torch.Tensor | None = None
+    ):
         from b12x.gemm import blockscaled
 
         self.name = name
@@ -120,9 +125,9 @@ class Nvfp4Linear:
         self.reduce = bool(reduce)
         self.bias = bias
         values, scales, self.global_scale = quantize_weight(weight)
-        self.packed = blockscaled.pack_weight(values, scales, recipe="nvfp4",
-                                             global_scale=self.global_scale,
-                                             global_scale_kind="reciprocal")
+        self.packed = blockscaled.pack_weight(
+            values, scales, recipe="nvfp4", global_scale=self.global_scale, global_scale_kind="reciprocal"
+        )
         self._plan = None
         self._capacity = 0
         _log(f"packed {self.name}: {self.out_features}x{self.in_features}")
@@ -131,7 +136,8 @@ class Nvfp4Linear:
     def from_quantized(cls, values: torch.Tensor, scale_u8: torch.Tensor, **kwargs):
         raise NotImplementedError(
             "h3-nvfp4: the pre-quantised (H3_MX_PREQUANT) checkpoint path is MXFP8-only; "
-            "run this arm with runtime quantisation")
+            "run this arm with runtime quantisation"
+        )
 
     @property
     def _weight_parts(self):
@@ -148,8 +154,7 @@ class Nvfp4Linear:
         if self._plan is None:
             raise RuntimeError(f"{self.name}: plan not prepared; call prepare_shared() at load")
         if m > self._capacity:
-            raise ValueError(
-                f"{self.name}: {m} rows exceeds the prepared capacity {self._capacity}")
+            raise ValueError(f"{self.name}: {m} rows exceeds the prepared capacity {self._capacity}")
         scale = act_scale(flat)
         if _TRACE_CALLS:
             _log(f"first call {self.name}: m={m} k={self.in_features} n={self.out_features}")
@@ -180,7 +185,7 @@ def _log(line: str) -> None:
     """One durable line per distinct event, so a run record can prove the arm engaged."""
     if line not in _LOGGED:
         _LOGGED.add(line)
-        print(f"[h3_nvfp4] {line}", flush=True)
+        logger.info("h3_nvfp4 %s", line)
 
 
 def prepare_shared(modules, capacity: int | None = None) -> dict[tuple[int, int], int]:
@@ -206,24 +211,25 @@ def prepare_shared(modules, capacity: int | None = None) -> dict[tuple[int, int]
         packed = mods[0].packed
         gw = mods[0].global_scale
         ga = act_scale(placeholder)
-        query = blockscaled.query_from_call(placeholder, packed, activation_mode="quantized",
-                                            activation_global_scale=ga)
+        query = blockscaled.query_from_call(
+            placeholder, packed, activation_mode="quantized", activation_global_scale=ga
+        )
         plan = blockscaled.plan(query)
 
         def call(state, placeholder=placeholder, packed=packed, gw=gw, ga=ga):
             values, scales = _values_scales(packed)
-            return PreparedCall(run=lambda: state.run(
-                placeholder, values, scales, gw, activation_scale=ga))
+            return PreparedCall(run=lambda: state.run(placeholder, values, scales, gw, activation_scale=ga))
 
         requests.append(plan.request(name=f"h3-nvfp4-{out_f}x{in_f}", prepare_call=call))
-        _log(f"plan {out_f}x{in_f}: weight_global_scale={float(gw):.4f} "
-             f"activation_global_scale={float(ga):.4f} capacity={cap}")
+        _log(
+            f"plan {out_f}x{in_f}: weight_global_scale={float(gw):.4f} "
+            f"activation_global_scale={float(ga):.4f} capacity={cap}"
+        )
         for mod in mods:
             mod._plan = plan
             mod._capacity = cap
 
     with PreparationSession(device=device, autotune=False, compile_workers=1) as session:
         session.prepare(tuple(requests))
-    _log(f"W4A4 arm active: {len(modules)} modules, {len(groups)} plans, capacity={cap}, "
-         f"shapes={sorted(groups)}")
+    _log(f"W4A4 arm active: {len(modules)} modules, {len(groups)} plans, capacity={cap}, shapes={sorted(groups)}")
     return {key: cap for key in groups}

@@ -43,7 +43,7 @@ class FastH3CheckpointSpec:
     def from_metadata(cls, metadata: Mapping[str, object]) -> FastH3CheckpointSpec:
         """Validate the release's own fastvideo_inference.json.
 
-        LOCAL PATCH (2026-10-01): accept both published FastH3 contracts — the
+        Accept both published FastH3 contracts — the
         8-step V2 release and the 4-step Preview-V1 VSA-DataFree release — and
         derive the sigma schedule from the release's own ``dmd_denoising_steps``
         instead of pinning the V2 eight-forward schedule.

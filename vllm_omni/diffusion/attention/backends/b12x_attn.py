@@ -3,8 +3,8 @@
 """B12X diffusion attention backend (SM120/SM121).
 
 Runs packed attention through ``b12x.attention.varlen``, the CuTe DSL kernel shipped by
-``local-inference-lab/b12x``. b12x is the house kernel library for the RTX PRO 6000 / RTX 5090
-(SM120) and already provides the attention, MoE and linear backends the LLM profiles select;
+``local-inference-lab/b12x``. b12x is the SM120/SM121 CuTe DSL kernel library
+and already provides the attention, MoE and linear backends the LLM profiles select;
 this backend makes MiniMax-H3's DiT attention consistent with that choice instead of pulling in
 a third-party kernel.
 

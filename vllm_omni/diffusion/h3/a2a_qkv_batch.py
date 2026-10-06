@@ -15,8 +15,7 @@ H3_A2A_QKV_BATCH). The file is re-read at most once per second, so a boot can A/
 without a restart, and a missing/unreadable file can only fall back to stock.
 
 Numerics note: under the int8 wire arm the batched call computes one activation scale for the
-stacked batch instead of one per tensor, so the int8 result is NOT bit-identical - it must be
-measured, not assumed. The bf16 arm is bit-identical.
+stacked batch instead of one per tensor, so the int8 result is NOT bit-identical; the bf16 arm is.
 
 Imported through the env-gated branch inserted into
 vllm_omni/diffusion/attention/parallel/ulysses.py by patch_h3_a2a_qkv_batch.py.
@@ -24,6 +23,7 @@ vllm_omni/diffusion/attention/parallel/ulysses.py by patch_h3_a2a_qkv_batch.py.
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from collections.abc import Sequence
@@ -31,6 +31,8 @@ from collections.abc import Sequence
 import torch
 
 from vllm_omni.diffusion.distributed.comm import SeqAllToAll4D
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["enabled", "batched_seq_a2a"]
 
@@ -63,7 +65,7 @@ def _note_engaged(n: int, shape: Sequence[int]) -> None:
     if key in _LOGGED:
         return
     _LOGGED.add(key)
-    print(f"[h3_a2a_qkv_batch] engaged: stacked {n} tensors shape={key[1]}", flush=True)
+    logger.info("h3_a2a_qkv_batch engaged: stacked %d tensors shape=%s", n, key[1])
 
 
 def batched_seq_a2a(
@@ -84,9 +86,7 @@ def batched_seq_a2a(
     first = tensors[0]
     same_shape = all(t.shape == first.shape for t in tensors[1:])
     if len(tensors) == 1 or not same_shape:
-        return [
-            SeqAllToAll4D.apply(group, t, scatter_idx, gather_idx, use_sync) for t in tensors
-        ]
+        return [SeqAllToAll4D.apply(group, t, scatter_idx, gather_idx, use_sync) for t in tensors]
 
     bsz = int(first.shape[0])
     stacked = torch.cat(list(tensors), dim=0)

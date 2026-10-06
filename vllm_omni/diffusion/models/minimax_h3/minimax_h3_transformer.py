@@ -1450,7 +1450,7 @@ class MiniMaxH3DiTModel(nn.Module):
 
         vLLM's LoRA manager injects into the vLLM Linear modules. With VLLM_OMNI_DIT_MXFP8 the
         forward goes through ``Mxfp8Linear`` instead, so a dynamically applied adapter is
-        bypassed entirely -- measured 2026-10-03: two different 4-step adapters returned
+        bypassed entirely: two different 4-step adapters returned
         byte-identical clips for exactly that reason. Fusing here keeps the adapter in the
         math, and the packed MXFP8 weights are then built from the fused values. Only applies
         when MXFP8 is on, since the dynamic path already applies the adapter otherwise.
@@ -1586,8 +1586,7 @@ class MiniMaxH3DiTModel(nn.Module):
         _Nvfp4Cls = _nvfp4_prepare = None
         if _nvfp4_ready:
             # NVFP4 (W4A4): same b12x op, FP4 weight, per-call activation global scale.
-            # Measured 2.13x on the four linears at M=19904; receipts in
-            # profile/sparse-attn-01/fp4/FINDINGS-nvfp4.md. Needs the port dir on PYTHONPATH.
+            # 2.13x on the four linears at M=19904 (in-tree package, no PYTHONPATH needed).
             from vllm_omni.diffusion.h3.nvfp4 import Nvfp4Linear as _Nvfp4Cls
             from vllm_omni.diffusion.h3.nvfp4 import prepare_shared as _nvfp4_prepare
         from vllm_omni.diffusion.h3.quant_policy import describe as _quant_describe
@@ -1603,7 +1602,7 @@ class MiniMaxH3DiTModel(nn.Module):
                 if not _nvfp4_ready:
                     # The policy file is permanent while the arm is per-boot, so a mismatch must NOT
                     # kill the boot: downgrade to MXFP8 and say so loudly. (This raise killed the
-                    # MXFP8 arm's boot with 'Orchestrator initialization failed' until 2026-10-04.)
+                    # MXFP8 arm's boot with 'Orchestrator initialization failed'.)
                     logger.warning(
                         "h3_quant: policy wants nvfp4 for %r but VLLM_OMNI_DIT_NVFP4 != 1; using mxfp8 for this role",
                         leaf,
