@@ -1607,24 +1607,18 @@ class MiniMaxH3DiTModel(nn.Module):
             # 2.13x on the four linears at M=19904 (in-tree package, no PYTHONPATH needed).
             from .nvfp4 import Nvfp4Linear as _Nvfp4Cls
             from .nvfp4 import prepare_shared as _nvfp4_prepare
-        _ROLE_DTYPE = {"qkv_proj": "mxfp8", "out_proj": "mxfp8", "fc1": "nvfp4", "fc2": "nvfp4"}
-
-        logger.info("MiniMax-H3 quant: mlp=nvfp4 attn=mxfp8 refiner=bf16")
+        # Per-role precision follows the arm: with NVFP4 enabled the MLP (fc1/fc2, where most of
+        # the linear work is) takes NVFP4 and the attention projections stay on MXFP8; without it
+        # every role is MXFP8. There is no separate per-role policy file: the two env gates above
+        # are the whole configuration surface.
+        logger.info(
+            "MiniMax-H3 quant: mlp=%s attn=%s refiner=bf16",
+            "nvfp4" if _nvfp4_ready else "mxfp8",
+            "mxfp8",
+        )
 
         def _cls_for(leaf: str):
-            pol = _ROLE_DTYPE.get(leaf, "bf16")
-            if pol == "bf16":
-                return None
-            if pol == "nvfp4":
-                if not _nvfp4_ready:
-                    # The policy file is permanent while the arm is per-boot, so a mismatch must NOT
-                    # kill the boot: downgrade to MXFP8 and say so loudly. (This raise killed the
-                    # MXFP8 arm's boot with 'Orchestrator initialization failed'.)
-                    logger.warning(
-                        "h3_quant: policy wants nvfp4 for %r but VLLM_OMNI_DIT_NVFP4 != 1; using mxfp8 for this role",
-                        leaf,
-                    )
-                    return _Mxfp8Cls
+            if _nvfp4_ready and leaf in ("fc1", "fc2"):
                 return _Nvfp4Cls
             return _Mxfp8Cls
 
