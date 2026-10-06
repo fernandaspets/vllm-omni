@@ -73,19 +73,14 @@ def _ensure_built() -> None:
         # site-packages/local_inference_nccl/lib/libnccl.so.2.31.2 (+ nccl_device headers).
         # Without this fallback the build aborts with "could not locate nvidia-nccl libnccl.so",
         # which kills the whole lane at model init (measured 2026-10-03).
-        if not nccl_libs or not any(
-            os.path.isfile(os.path.join(path, "nccl.h")) for path in include_paths
-        ):
+        if not nccl_libs or not any(os.path.isfile(os.path.join(path, "nccl.h")) for path in include_paths):
             for root in sorted(
-                glob.glob(os.path.join(site_packages, "*nccl*"))
-                + glob.glob(os.path.join(site_packages, "nvidia", "*"))
+                glob.glob(os.path.join(site_packages, "*nccl*")) + glob.glob(os.path.join(site_packages, "nvidia", "*"))
             ):
                 include_paths += glob.glob(os.path.join(root, "include"))
                 nccl_libs += glob.glob(os.path.join(root, "lib", "libnccl.so*"))
         if not nccl_libs:
-            raise RuntimeError(
-                "a2a_permute: could not locate libnccl.so (checked nvidia/* and local_inference_nccl)"
-            )
+            raise RuntimeError("a2a_permute: could not locate libnccl.so (checked nvidia/* and local_inference_nccl)")
         if not any(os.path.isfile(os.path.join(path, "nccl.h")) for path in include_paths):
             raise RuntimeError("a2a_permute: could not locate nccl.h")
         load(
@@ -134,11 +129,11 @@ def _symm_group_name(group_name: str) -> str:
         symm_mem.enable_symm_mem_for_group(name)
         logger.info(
             "[a2a_permute] symm-mem group %r enabled=%s",
-            name, symm_mem.is_symm_mem_enabled_for_group(name),
+            name,
+            symm_mem.is_symm_mem_enabled_for_group(name),
         )
     except Exception as exc:
-        logger.warning("[a2a_permute] enable_symm_mem_for_group(%r) failed: %s: %s",
-                       name, type(exc).__name__, exc)
+        logger.warning("[a2a_permute] enable_symm_mem_for_group(%r) failed: %s: %s", name, type(exc).__name__, exc)
     _SYMM_NAMES[group_name] = name
     return name
 
@@ -160,9 +155,7 @@ def _comm_ptr_for(group_name: str, device: torch.device) -> int:
     backend = pg._get_backend(torch.device(device))
     ptr = int(backend._comm_ptr())
     if ptr == 0:
-        raise RuntimeError(
-            f"a2a_permute: no host NCCL comm for group {group_name!r} on {device}"
-        )
+        raise RuntimeError(f"a2a_permute: no host NCCL comm for group {group_name!r} on {device}")
     _COMM_PTRS[key] = ptr
     logger.info("[a2a_permute] group %r host comm ptr=%d on %s", group_name, ptr, device)
     return ptr
@@ -249,8 +242,8 @@ def ulysses_qkv_fwd(x: torch.Tensor, group_name: str, world_size: int) -> torch.
     torch.ops.a2ap.copy_rows(x.view(rows, p, lc), symm_in)
     out = torch.empty(p, rows, lc, device=x.device, dtype=x.dtype)
     torch.ops.a2ap.all_to_all_permute(
-        symm_in, out, 1, 0, _symm_group_name(group_name),
-        _comm_ptr_for(group_name, x.device))
+        symm_in, out, 1, 0, _symm_group_name(group_name), _comm_ptr_for(group_name, x.device)
+    )
     # (p, rows, lc) -> (B, S_global, H_local, D), sequence ordered rank-major
     return out.reshape(p, B, s_local, Hl, D).permute(1, 0, 2, 3, 4).reshape(B, p * s_local, Hl, D).contiguous()
 
@@ -279,8 +272,8 @@ def ulysses_o_rev(y: torch.Tensor, group_name: str, world_size: int) -> torch.Te
     symm_in.copy_(y.reshape(B, p, s_local, Hl, D).permute(1, 0, 2, 3, 4).reshape(p, rows, cols))
     out = torch.empty(rows, p, cols, device=y.device, dtype=y.dtype)
     torch.ops.a2ap.all_to_all_permute(
-        symm_in, out, 0, 1, _symm_group_name(group_name),
-        _comm_ptr_for(group_name, y.device))
+        symm_in, out, 0, 1, _symm_group_name(group_name), _comm_ptr_for(group_name, y.device)
+    )
     # (rows, p, cols) -> (B, S_local, H, D), heads ordered rank-major
     return out.reshape(B, s_local, p, Hl, D).reshape(B, s_local, H, D).contiguous()
 

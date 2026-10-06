@@ -69,7 +69,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-_PREQUANT_CACHE: "set[str] | None | bool" = False
+_PREQUANT_CACHE: set[str] | None | bool = False
 
 
 def _prequant_keys() -> set[str] | None:
@@ -129,7 +129,7 @@ def _lora_delta(weights, device: torch.device | None = None) -> torch.Tensor:
         if target is None:
             target = a.device if a.device.type != "cpu" else None
         if target is None and torch.cuda.is_available():
-            target = torch.device("cuda", torch.cuda.current_device())
+            target = torch.device("cuda", torch.accelerator.current_device_index())
         if target is not None:
             a = a.to(target, non_blocking=True)
             b = b.to(target, non_blocking=True)
@@ -1515,9 +1515,9 @@ class MiniMaxH3DiTModel(nn.Module):
             # Rebuild this module's delta on the accelerator and release it before the next
             # one. Doing it up front costs the host minutes; holding all 200 fp32 deltas costs
             # ~38 GB of device memory and OOMs the load.
-            delta = torch.cat(
-                [_lora_delta(entry, device=weight.device) for entry in entries], dim=0
-            ).to(dtype=weight.dtype)
+            delta = torch.cat([_lora_delta(entry, device=weight.device) for entry in entries], dim=0).to(
+                dtype=weight.dtype
+            )
             if tuple(delta.shape) == tuple(weight.shape):
                 weight.data.add_(delta)
                 del delta
@@ -1586,8 +1586,7 @@ class MiniMaxH3DiTModel(nn.Module):
         for index, block in enumerate(self.blocks):
             attn, mlp = block.attn, block.mlp
 
-            def build(module, leaf: str, name: str, *, reduce: bool = False,
-                      gather_output: bool = False):
+            def build(module, leaf: str, name: str, *, reduce: bool = False, gather_output: bool = False):
                 """Use the checkpoint's e4m3 shard when present, else quantise the bf16 shard."""
                 nonlocal stashed
                 key = f"blocks.{index}.{leaf}.weight"
@@ -1595,22 +1594,21 @@ class MiniMaxH3DiTModel(nn.Module):
                 scales = stash_s.pop(key, None)
                 if values is not None and scales is not None:
                     stashed += 1
-                    return Mxfp8Linear.from_quantized(values, scales, name=name, reduce=reduce,
-                                                      bias=module.bias, gather_output=gather_output)
-                return Mxfp8Linear(module.weight, name=name, reduce=reduce, bias=module.bias,
-                                   gather_output=gather_output)
+                    return Mxfp8Linear.from_quantized(
+                        values, scales, name=name, reduce=reduce, bias=module.bias, gather_output=gather_output
+                    )
+                return Mxfp8Linear(
+                    module.weight, name=name, reduce=reduce, bias=module.bias, gather_output=gather_output
+                )
 
             attn._mx_qkv = build(attn.qkv_proj, "attn.qkv_proj", "qkv_proj")
-            attn._mx_out_proj = build(attn.out_proj, "attn.out_proj", "out_proj",
-                                      reduce=reduce_needed(attn.out_proj))
+            attn._mx_out_proj = build(attn.out_proj, "attn.out_proj", "out_proj", reduce=reduce_needed(attn.out_proj))
             mlp._mx_fc1 = build(mlp.fc1, "mlp.fc1", "fc1")
-            mlp._mx_fc2 = build(mlp.fc2, "mlp.fc2", "fc2",
-                                reduce=reduce_needed(mlp.fc2))
+            mlp._mx_fc2 = build(mlp.fc2, "mlp.fc2", "fc2", reduce=reduce_needed(mlp.fc2))
             modules += [attn._mx_qkv, attn._mx_out_proj, mlp._mx_fc1, mlp._mx_fc2]
             # The adaln projection is the last wide unquantised weight. Few rows per step, so
             # this is about weight bytes rather than FLOPs.
-            block._mx_adaln = build(block.adaln_proj.linear, "adaln_proj.linear", "adaln",
-                                    gather_output=True)
+            block._mx_adaln = build(block.adaln_proj.linear, "adaln_proj.linear", "adaln", gather_output=True)
             modules.append(block._mx_adaln)
         final_adaln_proj = getattr(getattr(self, "final_layer", None), "adaln_proj", None)
         final_linear = getattr(final_adaln_proj, "linear", None)
@@ -1621,11 +1619,12 @@ class MiniMaxH3DiTModel(nn.Module):
             if values is not None and scales is not None:
                 stashed += 1
                 final_adaln_proj._mx_linear = Mxfp8Linear.from_quantized(
-                    values, scales, name="adaln_final", bias=final_linear.bias, gather_output=True)
+                    values, scales, name="adaln_final", bias=final_linear.bias, gather_output=True
+                )
             else:
                 final_adaln_proj._mx_linear = Mxfp8Linear(
-                    final_linear.weight, name="adaln_final", bias=final_linear.bias,
-                    gather_output=True)
+                    final_linear.weight, name="adaln_final", bias=final_linear.bias, gather_output=True
+                )
             modules.append(final_adaln_proj._mx_linear)
         prepared = prepare_shared(modules)
         # The packed fp8 weight replaces the bf16 shard; keeping both would raise peak
@@ -1643,13 +1642,22 @@ class MiniMaxH3DiTModel(nn.Module):
             if adaln_weight is not None and adaln_weight.numel():
                 freed += adaln_weight.numel() * adaln_weight.element_size()
                 adaln_weight.data = adaln_weight.data.new_empty(0)
-        if final_linear is not None and getattr(final_linear, "weight", None) is not None \
-                and final_linear.weight.numel():
+        if (
+            final_linear is not None
+            and getattr(final_linear, "weight", None) is not None
+            and final_linear.weight.numel()
+        ):
             freed += final_linear.weight.numel() * final_linear.weight.element_size()
             final_linear.weight.data = final_linear.weight.data.new_empty(0)
-        logger.info("MiniMax-H3 MXFP8: %d linears across %d shapes prepared %s; "
-                    "%d from checkpoint; freed %.1f GiB of bf16 shards",
-                    len(modules), len(prepared), prepared, stashed, freed / 2**30)
+        logger.info(
+            "MiniMax-H3 MXFP8: %d linears across %d shapes prepared %s; "
+            "%d from checkpoint; freed %.1f GiB of bf16 shards",
+            len(modules),
+            len(prepared),
+            prepared,
+            stashed,
+            freed / 2**30,
+        )
 
     def validate_restored_host_weights(self) -> None:
         """Validate mixed-precision invariants after lease-backed restore."""
@@ -1679,7 +1687,7 @@ class MiniMaxH3DiTModel(nn.Module):
                 key = name
                 for prefix in ("transformer.", "transformers_ref."):
                     if key.startswith(prefix):
-                        key = key[len(prefix):]
+                        key = key[len(prefix) :]
                         break
                 is_scale = key.endswith(".mx_scale")
                 base = key[: -len(".mx_scale")] if is_scale else key

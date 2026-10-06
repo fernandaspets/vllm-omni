@@ -22,6 +22,7 @@ Two modes:
 
 Only one GPU (no ring) is handled here; the packed cu_seqlens describe the whole sequence.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -56,7 +57,6 @@ def _capacity(n: int) -> int:
     return max(_CAPACITY_STEP, ((int(n) + _CAPACITY_STEP - 1) // _CAPACITY_STEP) * _CAPACITY_STEP)
 
 
-
 class B12xAttentionBackend(AttentionBackend):
     """SM120/SM121 attention through local-inference-lab/b12x."""
 
@@ -77,7 +77,7 @@ class B12xAttentionBackend(AttentionBackend):
         return "B12X"
 
     @staticmethod
-    def get_impl_cls() -> type["B12xAttentionImpl"]:
+    def get_impl_cls() -> type[B12xAttentionImpl]:
         return B12xAttentionImpl
 
     @classmethod
@@ -113,16 +113,31 @@ class B12xAttentionImpl(AttentionImpl):
         if backend_kwargs:
             logger.warning("B12xAttentionImpl ignoring backend_kwargs: %s", list(backend_kwargs.keys()))
 
-    def _plan_for(self, rows: int, heads: int, head_dim: int, dtype: torch.dtype,
-                  device: torch.device, sparse: bool, num_tiles: int, total_blocks: int):
+    def _plan_for(
+        self,
+        rows: int,
+        heads: int,
+        head_dim: int,
+        dtype: torch.dtype,
+        device: torch.device,
+        sparse: bool,
+        num_tiles: int,
+        total_blocks: int,
+    ):
         key = (rows, heads, head_dim, dtype, device.index, sparse, num_tiles, total_blocks)
         plan = _PLAN_CACHE.get(key)
         if plan is None:
             q = torch.empty((rows, heads, head_dim), dtype=dtype, device=device)
             cu = torch.zeros(2, dtype=torch.int32, device=device)
             plan = _b12x_varlen.plan(
-                q, q, q, cu, cu,
-                max_seqlen_q=rows, max_seqlen_k=rows, causal=False,
+                q,
+                q,
+                q,
+                cu,
+                cu,
+                max_seqlen_q=rows,
+                max_seqlen_k=rows,
+                causal=False,
                 block_sparse=sparse,
                 num_q_tiles=(num_tiles if sparse else 0),
                 total_blocks_cap=(max(1, total_blocks) if sparse else 0),
@@ -172,7 +187,7 @@ class B12xAttentionImpl(AttentionImpl):
         )
         scratch = _SCRATCH_CACHE.get(cache_key)
         if scratch is None:
-            spec, = _require_prepared(plan, q3.device).scratch_plan.scratch_specs()
+            (spec,) = _require_prepared(plan, q3.device).scratch_plan.scratch_specs()
             scratch = torch.empty(spec.shape, dtype=spec.dtype, device=q3.device)
             _SCRATCH_CACHE[cache_key] = scratch
 
@@ -192,7 +207,7 @@ class B12xAttentionImpl(AttentionImpl):
         )
         result = state.run(binding)
         out = result[0] if isinstance(result, tuple) else result
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         if out.shape[0] != q3.shape[0]:
             full = q3.new_zeros((q3.shape[0],) + tuple(out.shape[1:]))
             full[: out.shape[0]] = out

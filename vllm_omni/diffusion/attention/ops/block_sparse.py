@@ -39,9 +39,11 @@ if not hasattr(torch.ops.vllm_omni, "fastvideo_block_sparse_attn_bshd"):
                 b12x_block_sparse_attn_bshd,
             )
 
-            return b12x_block_sparse_attn_bshd(
-                q, k, v, block_map, variable_block_sizes, logical_blocks
-            ).transpose(1, 2).contiguous()
+            return (
+                b12x_block_sparse_attn_bshd(q, k, v, block_map, variable_block_sizes, logical_blocks)
+                .transpose(1, 2)
+                .contiguous()
+            )
 
         # Prefer the explicitly selected native provider when it supports
         # these tensors; retain the existing Triton provider otherwise.

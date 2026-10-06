@@ -18,6 +18,7 @@ block. They are prepared eagerly at load (``prepare_shared``) so a served model 
 compilation on its first request. ``expected_m`` is deliberately not pinned, so a request
 with a different token count reuses the program.
 """
+
 from __future__ import annotations
 
 import os
@@ -68,8 +69,7 @@ def quantize_rows(source: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     safe = torch.where(max_abs > 0.0, max_abs / 448.0, torch.ones_like(max_abs))
     scale_u8 = (torch.ceil(torch.log2(safe)).clamp(-127, 127) + 127).to(torch.uint8)
     scale = scale_u8.view(torch.float8_e8m0fnu).to(torch.float32)
-    values = ((blocked / scale[..., None]).clamp(-448.0, 448.0)
-              .to(torch.float8_e4m3fn).reshape(rows, width).contiguous())
+    values = (blocked / scale[..., None]).clamp(-448.0, 448.0).to(torch.float8_e4m3fn).reshape(rows, width).contiguous()
     return values, scale_u8.contiguous()
 
 
@@ -78,7 +78,7 @@ def _capacity(n: int) -> int:
 
 
 def _device() -> torch.device:
-    return torch.device("cuda", torch.cuda.current_device())
+    return torch.device("cuda", torch.accelerator.current_device_index())
 
 
 def _tp_size() -> int:
@@ -98,8 +98,15 @@ def reduce_needed(module) -> bool:
 class Mxfp8Linear:
     """Drop-in for a locally-sharded linear ``weight [out, in]`` on b12x MXFP8."""
 
-    def __init__(self, weight: torch.Tensor, *, name: str = "h3-linear", reduce: bool = False,
-                 bias: torch.Tensor | None = None, gather_output: bool = False):
+    def __init__(
+        self,
+        weight: torch.Tensor,
+        *,
+        name: str = "h3-linear",
+        reduce: bool = False,
+        bias: torch.Tensor | None = None,
+        gather_output: bool = False,
+    ):
         from b12x.gemm import mxfp8_linear
 
         self.name = name
@@ -116,10 +123,16 @@ class Mxfp8Linear:
         self._capacity = 0
 
     @classmethod
-    def from_quantized(cls, values: torch.Tensor, scale_u8: torch.Tensor, *,
-                       name: str = "h3-linear", reduce: bool = False,
-                       bias: torch.Tensor | None = None,
-                       gather_output: bool = False) -> "Mxfp8Linear":
+    def from_quantized(
+        cls,
+        values: torch.Tensor,
+        scale_u8: torch.Tensor,
+        *,
+        name: str = "h3-linear",
+        reduce: bool = False,
+        bias: torch.Tensor | None = None,
+        gather_output: bool = False,
+    ) -> Mxfp8Linear:
         """Build from a stored (e4m3 values, uint8 E8M0 scales) pair.
 
         ``quantize_rows`` emits exactly this pair, so packing a pre-quantised shard yields the
@@ -152,8 +165,7 @@ class Mxfp8Linear:
         if self._plan is None:
             raise RuntimeError(f"{self.name}: plan not prepared; call prepare_shared() at load")
         if m > self._capacity:
-            raise ValueError(
-                f"{self.name}: {m} rows exceeds the prepared capacity {self._capacity}")
+            raise ValueError(f"{self.name}: {m} rows exceeds the prepared capacity {self._capacity}")
         out = mxfp8_linear.mm(flat, self.packed, plan=self._plan)
         out = out.reshape(*shape[:-1], self.out_features)
         if self.reduce and _tp_size() > 1:
@@ -197,9 +209,11 @@ def prepare_shared(modules, capacity: int | None = None) -> dict[tuple[int, int]
         plan = blockscaled.plan(query)
 
         def call(state, placeholder=placeholder, packed=packed):
-            return PreparedCall(run=lambda: state.run(
-                placeholder, packed.weight.values, packed.weight.scale_mma, None,
-                activation_scale=None))
+            return PreparedCall(
+                run=lambda: state.run(
+                    placeholder, packed.weight.values, packed.weight.scale_mma, None, activation_scale=None
+                )
+            )
 
         requests.append(plan.request(name=f"h3-mxfp8-{out_f}x{in_f}", prepare_call=call))
         for mod in mods:

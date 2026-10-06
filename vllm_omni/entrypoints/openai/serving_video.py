@@ -552,9 +552,7 @@ class OmniOpenAIServingVideo:
         # threads is the largest host-side cost of serving video, and the image
         # ships h264_nvenc / av1_nvenc.
         video_codec = (
-            str(request.extra_params.get("video_codec", "h264"))
-            if isinstance(request.extra_params, dict)
-            else "h264"
+            str(request.extra_params.get("video_codec", "h264")) if isinstance(request.extra_params, dict) else "h264"
         )
         video_codec_options = {"preset": "ultrafast", "threads": "0"}
         if request.extra_params is not None and isinstance(request.extra_params, dict):
@@ -627,9 +625,7 @@ class OmniOpenAIServingVideo:
         # threads is the largest host-side cost of serving video, and the image
         # ships h264_nvenc / av1_nvenc.
         video_codec = (
-            str(request.extra_params.get("video_codec", "h264"))
-            if isinstance(request.extra_params, dict)
-            else "h264"
+            str(request.extra_params.get("video_codec", "h264")) if isinstance(request.extra_params, dict) else "h264"
         )
         video_codec_options = {"preset": "ultrafast", "threads": "0"}
         if request.extra_params is not None and isinstance(request.extra_params, dict):
