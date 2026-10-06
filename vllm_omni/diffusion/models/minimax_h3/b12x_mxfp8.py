@@ -121,7 +121,7 @@ class Mxfp8Linear:
         name: str = "h3-linear",
         reduce: bool = False,
         bias: torch.Tensor | None = None,
-    ) -> "Mxfp8Linear":
+    ) -> Mxfp8Linear:
         """Build from a stored (e4m3 values, uint8 E8M0 scales) pair.
 
         ``quantize_rows`` emits exactly this pair, so packing a pre-quantised shard yields the
