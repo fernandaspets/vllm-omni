@@ -10,6 +10,7 @@ layout.
 from __future__ import annotations
 
 import math
+import os
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -66,6 +67,74 @@ if TYPE_CHECKING:
     from vllm_omni.diffusion.data import OmniDiffusionConfig
 
 logger = init_logger(__name__)
+
+
+_PREQUANT_CACHE: "set[str] | None | bool" = False
+
+
+def _prequant_keys() -> set[str] | None:
+    """Keys of a pre-quantised DiT checkpoint when armed, else None (runtime quantisation)."""
+    global _PREQUANT_CACHE
+    if _PREQUANT_CACHE is not False:
+        return _PREQUANT_CACHE
+    try:
+        from vllm_omni.diffusion.models.minimax_h3.b12x_mxfp8 import prequant_manifest
+
+        _PREQUANT_CACHE = prequant_manifest()
+    except Exception:  # never break weight loading on this optional path
+        _PREQUANT_CACHE = None
+    return _PREQUANT_CACHE
+
+
+def _prequant_covers(prefix: str) -> bool:
+    """Whether the pre-quantised checkpoint supplies this module's wide weights.
+
+    Decided per module prefix, not globally: a checkpoint may quantise the 50 DiT blocks
+    and leave the two token-refiner blocks as bf16, in which case only the former may have
+    their parameters released.
+    """
+    keys = _prequant_keys()
+    if not keys:
+        return False
+    return any(key.startswith(prefix + ".") for key in keys)
+
+
+def _drop_wide_weight(module: nn.Module) -> None:
+    """Release a wide bf16 shard that a pre-quantised checkpoint supplies instead.
+
+    vLLM allocates every linear's full-size parameter at construction, so skipping the load
+    is not enough to save the memory -- the allocation itself has to go. The MXFP8 wrapper
+    owns the math from here on, so the parameter is replaced by an empty tensor.
+    """
+    weight = getattr(module, "weight", None)
+    if weight is not None and weight.numel():
+        module.weight = nn.Parameter(weight.new_empty(0), requires_grad=False)
+
+
+def _lora_delta(weights, device: torch.device | None = None) -> torch.Tensor:
+    """Effective delta of a (possibly packed) LoRA entry, rows in module order.
+
+    The rank products are rebuilt on the accelerator: the adapter tensors arrive on the
+    host, and a few TFLOP of rank-128 b@a on CPU adds minutes to a load that already has
+    a startup deadline.
+    """
+    a_list = getattr(weights, "lora_a", None)
+    b_list = getattr(weights, "lora_b", None)
+    scaling = getattr(weights, "scaling", None)
+    if not isinstance(a_list, (list, tuple)):
+        a_list, b_list, scaling = [a_list], [b_list], [scaling]
+    parts = []
+    for a, b, s in zip(a_list, b_list, scaling):
+        target = device
+        if target is None:
+            target = a.device if a.device.type != "cpu" else None
+        if target is None and torch.cuda.is_available():
+            target = torch.device("cuda", torch.cuda.current_device())
+        if target is not None:
+            a = a.to(target, non_blocking=True)
+            b = b.to(target, non_blocking=True)
+        parts.append((b.to(torch.float32) @ a.to(torch.float32)) * float(s))
+    return torch.cat(parts, dim=0)
 
 
 # Packed multi-request forwards require the attention backend to actually
@@ -453,6 +522,11 @@ class MiniMaxH3Attention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.out_proj",
         )
+        if _prequant_covers(prefix):
+            _drop_wide_weight(self.qkv_proj)
+            _drop_wide_weight(self.out_proj)
+        self._mx_qkv = None
+        self._mx_out_proj = None
         # VSA compression gate. A FastH3 VSA artifact assigns this projection
         # with ``.set_weight``; the dense path never builds it, so the module is
         # created only once the loader knows a VSA artifact is coming.
@@ -652,7 +726,7 @@ class MiniMaxH3Attention(nn.Module):
         all-to-all restores the row shard before the output projection.
         """
         total = x.shape[0]
-        qkv, _ = self.qkv_proj(x)
+        qkv = self._mx_qkv(x)[0] if self._mx_qkv is not None else self.qkv_proj(x)[0]
         q_size = self.num_heads * self.head_dim
         kv_size = self.num_kv_heads * self.head_dim
         q, k, v = qkv.split([q_size, kv_size, kv_size], dim=-1)
@@ -700,7 +774,7 @@ class MiniMaxH3Attention(nn.Module):
             gate_compress=gate_compress,
         )
         out = out.reshape(total, self.num_heads * self.head_dim)
-        out, _ = self.out_proj(out)
+        out = self._mx_out_proj(out)[0] if self._mx_out_proj is not None else self.out_proj(out)[0]
         return out
 
 
@@ -734,35 +808,23 @@ class MiniMaxH3MLP(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.fc2",
         )
+        if _prequant_covers(prefix):
+            _drop_wide_weight(self.fc1)
+            _drop_wide_weight(self.fc2)
         self._mx_fc1 = None
+        self._mx_fc2 = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        mx = self._mxfp8_fc1()
-        if mx is not None:
-            hidden = mx(x)
+        if self._mx_fc1 is not None:
+            hidden = self._mx_fc1(x)[0]
         else:
             hidden, _ = self.fc1(x)
         hidden = self.act_fn(hidden)
-        out, _ = self.fc2(hidden)
+        if self._mx_fc2 is not None:
+            out = self._mx_fc2(hidden)[0]
+        else:
+            out, _ = self.fc2(hidden)
         return out
-
-    def _mxfp8_fc1(self):
-        """b12x MXFP8 up-projection on the local shard, or None when disabled.
-
-        Built lazily: the shard only exists after vLLM has loaded the weights. The
-        merged fc1 weight is [2*ffn_hidden/TP, hidden], quantized whole -- SiluAndMul
-        chunks the output afterwards, so the split is unaffected.
-        """
-        if not _mxfp8_enabled():
-            return None
-        if self._mx_fc1 is None:
-            from vllm_omni.diffusion.models.minimax_h3.b12x_mxfp8 import Mxfp8Linear
-
-            weight = self.fc1.weight
-            if weight.dtype != torch.bfloat16:
-                weight = weight.to(torch.bfloat16)
-            self._mx_fc1 = Mxfp8Linear(weight, name="h3-ffn-fc1-mxfp8")
-        return self._mx_fc1
 
 
 def _mxfp8_enabled() -> bool:
@@ -815,8 +877,15 @@ class MiniMaxH3AdalnProj(nn.Module):
         """t_emb: [M, t_dim] -> expand_ratio tensors of [M*modality_num, H]."""
 
         def project() -> torch.Tensor:
-            x = nn.functional.silu(t_emb)
-            return self.linear(x.to(_BF16_DTYPE))[0]
+            x = nn.functional.silu(t_emb).to(_BF16_DTYPE)
+            # LOCAL ADDITION 2026-10-03: use the MXFP8 projection when _enable_mxfp8 built one,
+            # so the largest remaining unquantised weight (50 x [96768, 2688] plus the final
+            # layer's [10752, 2688] = 24.2 GiB bf16 whole-model) becomes fp8. The module is
+            # ColumnParallelLinear(gather_output=True); Mxfp8Linear reproduces that gather.
+            mx = getattr(self, "_mx_linear", None)
+            if mx is not None:
+                return mx(x)[0]
+            return self.linear(x)[0]
 
         x = (
             project()
@@ -1380,6 +1449,207 @@ class MiniMaxH3DiTModel(nn.Module):
         for name, buffer in self.named_buffers():
             if name in MINIMAX_H3_FP32_BUFFER_NAMES and buffer.dtype != _FP32_DTYPE:
                 raise ValueError(f"{name} must stay fp32 after load, got {buffer.dtype}.")
+        self._fuse_turbo_lora()
+        self._enable_mxfp8()
+
+    def _fuse_turbo_lora(self) -> None:
+        """Add a distilled adapter's deltas into the wide linears before MXFP8 packing.
+
+        vLLM's LoRA manager injects into the vLLM Linear modules. With VLLM_OMNI_DIT_MXFP8 the
+        forward goes through ``Mxfp8Linear`` instead, so a dynamically applied adapter is
+        bypassed entirely -- measured 2026-10-03: two different 4-step adapters returned
+        byte-identical clips for exactly that reason. Fusing here keeps the adapter in the
+        math, and the packed MXFP8 weights are then built from the fused values. Only applies
+        when MXFP8 is on, since the dynamic path already applies the adapter otherwise.
+        """
+        path = os.environ.get("H3_FUSE_LORA")
+        if not path or not _mxfp8_enabled():
+            return
+        from vllm.lora.request import LoRARequest
+
+        from vllm_omni.diffusion.models.minimax_h3.lora import load_minimax_h3_turbo_lora
+
+        request = LoRARequest(lora_name="h3-fuse", lora_int_id=1, lora_path=path)
+        loaded = load_minimax_h3_turbo_lora(
+            partition="ref2va",
+            lora_request=request,
+            lora_path=path,
+            dtype=_BF16_DTYPE,
+            unsupported_offload_mode=None,
+        )
+        if loaded is None:
+            raise ValueError(f"H3_FUSE_LORA={path} is not a recognisable MiniMax-H3 adapter")
+        lora_model, _peft_helper, spec = loaded
+        # The adapter's q/k/v deltas target separate modules; the served model has one fused
+        # ``qkv_proj`` whose rows are [q; k; v]. Pack them here, and only touch the wide linears
+        # MXFP8 actually wraps -- the token-refiner linears keep vLLM's dynamic LoRA, so fusing
+        # those too would apply the delta twice.
+        import re
+
+        packed: dict[str, dict[str, object]] = {}
+        plain: dict[str, list[object]] = {}
+        for module_name, weights in tuple(lora_model.loras.items()):
+            match = re.match(r"^(blocks\.\d+)\.attn\.to_(q|k|v)$", module_name)
+            if match:
+                packed.setdefault(f"{match.group(1)}.attn.qkv_proj", {})[match.group(2)] = weights
+                continue
+            if re.match(r"^blocks\.\d+\.(attn\.out_proj|mlp\.fc1|mlp\.fc2)$", module_name):
+                plain.setdefault(module_name, []).append(weights)
+        for module_name, parts in packed.items():
+            if set(parts) != {"q", "k", "v"}:
+                raise ValueError(f"incomplete q/k/v adapter group for {module_name}: {sorted(parts)}")
+            plain[module_name] = [parts["q"], parts["k"], parts["v"]]
+
+        fused = 0
+        skipped = []
+        for module_name, entries in plain.items():
+            try:
+                module = self.get_submodule(module_name)
+            except AttributeError:
+                skipped.append(module_name)
+                continue
+            weight = getattr(module, "weight", None)
+            if weight is None or not weight.numel():
+                skipped.append(module_name)
+                continue
+            # Rebuild this module's delta on the accelerator and release it before the next
+            # one. Doing it up front costs the host minutes; holding all 200 fp32 deltas costs
+            # ~38 GB of device memory and OOMs the load.
+            delta = torch.cat(
+                [_lora_delta(entry, device=weight.device) for entry in entries], dim=0
+            ).to(dtype=weight.dtype)
+            if tuple(delta.shape) == tuple(weight.shape):
+                weight.data.add_(delta)
+                del delta
+                fused += 1
+                continue
+            # Tensor-parallel shard: the local weight is a slice of the checkpoint tensor, so run
+            # the full-width delta back through the engine's own weight_loader. That guarantees
+            # the delta is sliced exactly like the weights it is being added to.
+            loader = getattr(weight, "weight_loader", None)
+            if loader is None:
+                raise ValueError(
+                    f"adapter delta {tuple(delta.shape)} != {module_name} weight "
+                    f"{tuple(weight.shape)} and no weight_loader to slice it"
+                )
+            # vLLM's loader writes its own slicing into the parameter, so let it write the delta
+            # there, keep that slice, put the real weight back, and add the two. transients are
+            # one local shard each, so peak cost is one layer.
+            original = weight.data.clone()
+            try:
+                if module_name.endswith(".mlp.fc1"):
+                    gate, up = delta.chunk(2, dim=0)
+                    loader(weight, gate, 0)
+                    loader(weight, up, 1)
+                else:
+                    loader(weight, delta)
+                delta_local = weight.data.clone()
+            finally:
+                weight.data.copy_(original)
+            if tuple(delta_local.shape) != tuple(weight.shape):
+                raise ValueError(
+                    f"adapter delta sliced to {tuple(delta_local.shape)} does not match "
+                    f"{module_name} weight {tuple(weight.shape)}"
+                )
+            weight.data.add_(delta_local)
+            fused += 1
+        if skipped:
+            raise ValueError(f"H3_FUSE_LORA: {len(skipped)} linears not fused, e.g. {skipped[:3]}")
+        logger.info(
+            "MiniMax-H3 fused adapter %s into %d linears before MXFP8 packing (scale %.4g)",
+            spec.filename,
+            fused,
+            spec.alpha / spec.rank,
+        )
+
+    def _enable_mxfp8(self) -> None:
+        """Swap the wide DiT linears onto b12x MXFP8 and prepare their plans.
+
+        Runs after the weights are loaded, so each linear sees its final local shard.
+        One plan per (in, out) shape is prepared and shared by every block: a b12x plan
+        describes shapes and capacity, not weights. The row-parallel projections keep
+        their tensor-parallel all-reduce. No-op unless VLLM_OMNI_DIT_MXFP8 is set.
+        """
+        if not _mxfp8_enabled():
+            return
+        from vllm_omni.diffusion.models.minimax_h3.b12x_mxfp8 import (
+            Mxfp8Linear,
+            prepare_shared,
+            reduce_needed,
+        )
+
+        modules = []
+        stashed = 0
+        stash_w = getattr(self, "_mx_stash_w", {})
+        stash_s = getattr(self, "_mx_stash_s", {})
+
+        for index, block in enumerate(self.blocks):
+            attn, mlp = block.attn, block.mlp
+
+            def build(module, leaf: str, name: str, *, reduce: bool = False,
+                      gather_output: bool = False):
+                """Use the checkpoint's e4m3 shard when present, else quantise the bf16 shard."""
+                nonlocal stashed
+                key = f"blocks.{index}.{leaf}.weight"
+                values = stash_w.pop(key, None)
+                scales = stash_s.pop(key, None)
+                if values is not None and scales is not None:
+                    stashed += 1
+                    return Mxfp8Linear.from_quantized(values, scales, name=name, reduce=reduce,
+                                                      bias=module.bias, gather_output=gather_output)
+                return Mxfp8Linear(module.weight, name=name, reduce=reduce, bias=module.bias,
+                                   gather_output=gather_output)
+
+            attn._mx_qkv = build(attn.qkv_proj, "attn.qkv_proj", "qkv_proj")
+            attn._mx_out_proj = build(attn.out_proj, "attn.out_proj", "out_proj",
+                                      reduce=reduce_needed(attn.out_proj))
+            mlp._mx_fc1 = build(mlp.fc1, "mlp.fc1", "fc1")
+            mlp._mx_fc2 = build(mlp.fc2, "mlp.fc2", "fc2",
+                                reduce=reduce_needed(mlp.fc2))
+            modules += [attn._mx_qkv, attn._mx_out_proj, mlp._mx_fc1, mlp._mx_fc2]
+            # The adaln projection is the last wide unquantised weight. Few rows per step, so
+            # this is about weight bytes rather than FLOPs.
+            block._mx_adaln = build(block.adaln_proj.linear, "adaln_proj.linear", "adaln",
+                                    gather_output=True)
+            modules.append(block._mx_adaln)
+        final_adaln_proj = getattr(getattr(self, "final_layer", None), "adaln_proj", None)
+        final_linear = getattr(final_adaln_proj, "linear", None)
+        if final_linear is not None and getattr(final_linear, "weight", None) is not None:
+            key = "final_layer.adaln_proj.linear.weight"
+            values = stash_w.pop(key, None)
+            scales = stash_s.pop(key, None)
+            if values is not None and scales is not None:
+                stashed += 1
+                final_adaln_proj._mx_linear = Mxfp8Linear.from_quantized(
+                    values, scales, name="adaln_final", bias=final_linear.bias, gather_output=True)
+            else:
+                final_adaln_proj._mx_linear = Mxfp8Linear(
+                    final_linear.weight, name="adaln_final", bias=final_linear.bias,
+                    gather_output=True)
+            modules.append(final_adaln_proj._mx_linear)
+        prepared = prepare_shared(modules)
+        # The packed fp8 weight replaces the bf16 shard; keeping both would raise peak
+        # memory instead of lowering it (that is what made TP1 x USP4 OOM at 95 GiB).
+        freed = 0
+        for block in self.blocks:
+            for owner in (block.attn, block.mlp):
+                for name in ("qkv_proj", "out_proj", "fc1", "fc2"):
+                    mod = getattr(owner, name, None)
+                    weight = getattr(mod, "weight", None) if mod is not None else None
+                    if weight is not None and weight.numel():
+                        freed += weight.numel() * weight.element_size()
+                        weight.data = weight.data.new_empty(0)
+            adaln_weight = getattr(getattr(block.adaln_proj, "linear", None), "weight", None)
+            if adaln_weight is not None and adaln_weight.numel():
+                freed += adaln_weight.numel() * adaln_weight.element_size()
+                adaln_weight.data = adaln_weight.data.new_empty(0)
+        if final_linear is not None and getattr(final_linear, "weight", None) is not None \
+                and final_linear.weight.numel():
+            freed += final_linear.weight.numel() * final_linear.weight.element_size()
+            final_linear.weight.data = final_linear.weight.data.new_empty(0)
+        logger.info("MiniMax-H3 MXFP8: %d linears across %d shapes prepared %s; "
+                    "%d from checkpoint; freed %.1f GiB of bf16 shards",
+                    len(modules), len(prepared), prepared, stashed, freed / 2**30)
 
     def validate_restored_host_weights(self) -> None:
         """Validate mixed-precision invariants after lease-backed restore."""
@@ -1398,8 +1668,24 @@ class MiniMaxH3DiTModel(nn.Module):
         diffusers_weights = getattr(self, "_diffusers_weights", False)
         qkv_parts: dict[str, set[str]] = {}
         source_names: set[str] = set()
+        prequant = _prequant_keys()
+        self._mx_stash_w: dict[str, torch.Tensor] = {}
+        self._mx_stash_s: dict[str, torch.Tensor] = {}
         for name, loaded_weight in weights:
             layout = "plain"
+            if prequant is not None:
+                # A stored e4m3 + uint8-scale pair is held back instead of being cast into a
+                # bf16 shard; _enable_mxfp8 packs it directly at the end of the load.
+                key = name
+                for prefix in ("transformer.", "transformers_ref."):
+                    if key.startswith(prefix):
+                        key = key[len(prefix):]
+                        break
+                is_scale = key.endswith(".mx_scale")
+                base = key[: -len(".mx_scale")] if is_scale else key
+                if base in prequant:
+                    (self._mx_stash_s if is_scale else self._mx_stash_w)[base] = loaded_weight
+                    continue
             if diffusers_weights:
                 if name in source_names:
                     raise ValueError(f"duplicate Diffusers H3 weight: {name}")
