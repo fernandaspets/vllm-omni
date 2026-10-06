@@ -5,7 +5,7 @@ Why this exists
 The two existing arms are all-or-nothing: `VLLM_OMNI_DIT_MXFP8=1` swaps all 200 wide
 linears (50 blocks x {attn.qkv_proj, attn.out_proj, mlp.fc1, mlp.fc2}) onto b12x e4m3,
 and on top of that `VLLM_OMNI_DIT_NVFP4=1` swaps the same 200 onto b12x FP4 (W4A4).
-The full NVFP4 swap is the fastest arm (-1.92 s/clip on 4 steps) but it
+A full NVFP4 swap is the fastest arm but it
 changes the precision of the attention projections as well as the MLP, i.e. it stacks
 the whole quality surface at once.
 
@@ -16,7 +16,7 @@ This module lets one boot choose **per role**:
     bf16   -> leave the original vLLM linear untouched            (highest precision, no swap)
 
 The default policy is the documented middle ground: the MLP (`fc1`+`fc2`) takes NVFP4
-because it is ~63% of the NVFP4 win, while the attention projections
+because that is where most of the gain is, while the attention projections
 (`qkv_proj`+`out_proj`) stay MXFP8. Refiner/AdaLN paths stay bf16.
 
 No-swap is free on the model side: the DiT forwards read
@@ -42,7 +42,7 @@ import time
 
 # role -> dtype, the built-in default
 DEFAULT_POLICY: dict[str, str] = {
-    "mlp": "nvfp4",  # fc1 + fc2: ~63% of the NVFP4 win
+    "mlp": "nvfp4",  # fc1 + fc2: the bulk of the linear work
     "attn": "mxfp8",  # qkv_proj + out_proj: keep the sensitive projections high precision
     "refiner": "bf16",  # token_refiner blocks + anything else: untouched
 }
@@ -92,13 +92,15 @@ def current() -> dict[str, str]:
 
 
 def role_for(leaf: str) -> str:
-    """Map a construction-site leaf name to a policy role.
+    """Map a construction-site name to a policy role.
 
-    Accepts either a bare role ('qkv_proj') or a dotted leaf ('attn.qkv_proj'), because the
-    construction site passes both spellings; getting this wrong silently made every role fall
-    through to 'refiner' and disabled *all* quantisation.
+    Accepts a leaf ('qkv_proj'), a dotted leaf ('attn.qkv_proj'), or a role name ('mlp'); the
+    construction site passes more than one spelling. An unrecognised name maps to 'refiner', which
+    leaves the linear untouched rather than quantising something it should not.
     """
     key = leaf.rsplit(".", 1)[-1]
+    if key in DEFAULT_POLICY:
+        return key
     return _LEAF_ROLE.get(key, "refiner")
 
 

@@ -1,15 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
-"""CUDA round-trip tests for the H3 lane's int8 all-to-all packet codec.
+"""CUDA round-trip tests for the H3 int8 all-to-all packet codec.
 
 The speed argument for the wire is "0.5625x the bytes"; the price is quantisation error, and
 the number that matters to a render is that the error stays inside the tolerance the arm was
 accepted at. ``round_trip_error`` encodes and decodes locally (no collective), so this runs on
 one GPU and cannot be confused with a distributed test.
 
-These exercise the real Triton kernels, so they need CUDA and the lane's ``port`` directory on
-``PYTHONPATH``; otherwise they skip with that reason. They are deliberately small (a few MB) so
-they can run beside a loaded lane without disturbing it.
+These exercise the real Triton kernels, so they need CUDA. They are deliberately small (a few MB)
+so they can run beside a loaded lane without disturbing it.
 """
 
 from __future__ import annotations
@@ -17,9 +16,9 @@ from __future__ import annotations
 import math
 
 import pytest
+import torch
 
-h3_a2a_wire = pytest.importorskip("vllm_omni.diffusion.h3.a2a_wire", reason="H3 lane port dir is not on PYTHONPATH (lane-only module)")
-torch = pytest.importorskip("torch")
+from vllm_omni.diffusion.h3 import a2a_wire as h3_a2a_wire
 
 if not torch.cuda.is_available():  # pragma: no cover - hardware gate
     pytest.skip("CUDA is not available", allow_module_level=True)

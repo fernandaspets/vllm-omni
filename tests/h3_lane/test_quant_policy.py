@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
-"""Unit tests for the H3 lane's per-role quantisation policy (``port/h3_quant_policy.py``).
+"""Unit tests for the H3 lane's per-role quantisation policy (``vllm_omni.diffusion.h3.quant_policy``).
 
 The policy decides, per role, whether a wide DiT linear is swapped to NVFP4, kept at MXFP8,
 or left as the original bf16 linear. Two failure modes were observed on the lane and are
@@ -12,17 +12,14 @@ pinned here:
    normally (lane log: ``mxfp8=0 nvfp4=0 bf16_roles=400``).
 2. The control file is hand-edited between boots, so a typo must never kill a load.
 
-The module is stdlib-only by design, so no GPU and no torch are needed. The tests need the
-lane's ``port`` directory on ``PYTHONPATH``; otherwise they skip with that reason.
+The module is stdlib-only by design, so no GPU and no torch are needed.
 """
 
 from __future__ import annotations
 
 import pytest
 
-h3_quant_policy = pytest.importorskip(
-    "vllm_omni.diffusion.h3.quant_policy", reason="H3 lane port dir is not on PYTHONPATH (lane-only module)"
-)
+from vllm_omni.diffusion.h3 import quant_policy as h3_quant_policy
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 

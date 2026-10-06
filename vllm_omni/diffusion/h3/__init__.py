@@ -1,19 +1,15 @@
-"""MiniMax-H3 lane runtime extensions.
+"""Runtime extensions for MiniMax-H3: quantised collectives and decoder fixes.
 
-These modules previously shipped as loose files on ``PYTHONPATH`` and were imported by bare name. They
-live in the tree so a checkout of this branch is self-contained: no out-of-tree shim directory is
-required at runtime.
-
-Contents
---------
-``a2a_wire``        int8 all-to-all transport (the 0.5625x byte lever)
-``ar_wire``         int8 all-reduce transport
-``a2a_qkv_batch``   batched/stacked qkv all-to-all (opt-in arm; slower, default off)
+Modules
+-------
+``a2a_wire``        int8 all-to-all transport for the Ulysses exchange
+``ar_wire``         int8 tensor-parallel all-reduce
+``a2a_qkv_batch``   batched q/k/v all-to-all in a single collective (opt-in)
 ``nvfp4``           opt-in W4A4 DiT linear
 ``quant_policy``    per-role quantisation policy, control-file driven
-``vae_sm120``       SM12x VAE decoder fixes
-``comm``            quantisation primitives and kernels shared by the wire codecs
+``vae_sm120``       SM12x video-VAE decoder fixes
+``comm``            quantisation primitives and Triton kernels shared by the wire codecs
 
-Nothing is imported here on purpose: importing this package must not pull in torch, triton or the
-kernel libraries.
+Everything is opt-in and off by default, so a stock run is unaffected. Nothing is imported here on
+purpose: importing this package must not pull in torch, triton or the kernel libraries.
 """

@@ -7,15 +7,13 @@ packets) for its own attention layout; this lane's `all_to_all_4D` exchanges a t
 decode around the existing `all_to_all_single`, with every surrounding permute untouched.
 
 At this packet size, int8/UE5M3 packets are 0.5625x bf16 bytes at rel ~4-6e-3; raw FP8 is 0.5000x at
-rel 5.2e-2, so int8 is the better trade and is the only mode wired here. First lane arm showed the
-collective itself going 632-648 -> 366 ms but the step only -2.9%, because encode/decode added
-~400 launches/step plus per-call allocations; this version pools the intermediate buffers (safe: both
-directions of all_to_all_4D end in a `.contiguous()` copy, so nothing returned aliases them) and makes
-the launch geometry tunable.
+rel 5.2e-2, so int8 is the better trade and is the only mode wired here. Encoding and decoding add
+kernels on a step that is already launch-bound, so the byte saving only pays when the collective
+itself is wire-bound; the launch geometry is exposed for tuning.
 
     H3_A2A_WIRE=bf16|int8     (default bf16 -> unchanged code path, byte-identical clips)
     H3_A2A_WIRE_STATS=1       log byte/error stats on every call (default: first call only)
-    H3_A2A_WIRE_BUFCACHE=0    disable the intermediate-buffer pool
+    H3_A2A_WIRE_BUFCACHE=1    reuse the intermediate buffers (default 0; see `_bufcache`)
     H3_A2A_WIRE_RPP=<int>     records per program for both kernels (default 32)
     H3_A2A_WIRE_WARPS=<int>   num_warps for both kernels (default 8)
 
@@ -26,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 
 import torch
 import torch.distributed as dist
@@ -46,12 +45,7 @@ _STATE = {"calls": 0, "failed": False}
 _POOL: dict[tuple, torch.Tensor] = {}
 
 
-def _wire() -> str:
-    """Transport mode: env default, overridable at runtime by a control file.
-
-    The control file exists so one boot can A/B both arms without rebooting (the workers re-read it on
-    every exchange). Precedence: control file (if readable and non-empty) -> H3_A2A_WIRE -> "bf16".
-    """
+def _resolve_wire() -> str:
     path = os.environ.get("H3_A2A_WIRE_CONTROL", "")
     if path:
         try:
@@ -64,6 +58,29 @@ def _wire() -> str:
         except Exception:  # never let a control-file read break the exchange
             pass
     return os.environ.get("H3_A2A_WIRE", "bf16").strip().lower()
+
+
+_WIRE_TTL = 1.0
+_wire_cache: dict = {"t": 0.0, "value": None}
+
+
+def _wire() -> str:
+    """Transport mode: env default, overridable at runtime by a control file.
+
+    Precedence: control file (if readable and non-empty) -> H3_A2A_WIRE -> "bf16".
+
+    The control file lets one boot switch arms without a restart, but this runs on every exchange
+    (200 per step), so it is re-read at most once a second rather than opened per call - the same
+    TTL the quantisation policy and the batched-qkv gate use. A missing or unreadable file always
+    resolves to bf16, so the stock path is the only failure mode.
+    """
+    now = time.monotonic()
+    cached = _wire_cache["value"]
+    if cached is not None and now - _wire_cache["t"] < _WIRE_TTL:
+        return cached
+    value = _resolve_wire()
+    _wire_cache["t"], _wire_cache["value"] = now, value
+    return value
 
 
 # Both the stock int8 mode and the fused variant keep the NON-fused directions (notably the
@@ -96,8 +113,6 @@ def _log(msg: str) -> None:
     logger.info("%s %s", TAG, msg)
 
 
-_LAST_MODE = {"value": None}
-
 _SEEN_MODES: set = set()
 
 
@@ -107,7 +122,6 @@ def _log_mode_once(mode: str) -> None:
     Not per transition: the qkv direction and the reverse/o direction can carry different mode
     labels, which made a transition log emit 2400 lines per boot and drown the real signal.
     """
-    _LAST_MODE["value"] = mode
     if mode not in _SEEN_MODES:
         _SEEN_MODES.add(mode)
         _log(f"transport mode -> {mode}")
