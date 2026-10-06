@@ -1448,6 +1448,20 @@ class MiniMaxH3DiTModel(nn.Module):
                 raise ValueError(f"{name} must stay fp32 after load, got {buffer.dtype}.")
         self._fuse_turbo_lora()
         self._enable_mxfp8()
+        self._install_transports()
+
+    def _install_transports(self) -> None:
+        """Register the H3 collectives with the generic layers that carry them.
+
+        The generic distributed/attention layers hold no H3 knowledge; the model installs
+        its own transports here. Both are opt-in and default off, so a stock run is
+        unchanged (the wire resolves to bf16, the qkv batching is disabled).
+        """
+        from vllm_omni.diffusion.h3.a2a_qkv_batch import install as install_qkv_batch
+        from vllm_omni.diffusion.h3.a2a_wire import install as install_a2a_wire
+
+        install_a2a_wire()
+        install_qkv_batch()
 
     def _fuse_turbo_lora(self) -> None:
         """Add a distilled adapter's deltas into the wide linears before MXFP8 packing.

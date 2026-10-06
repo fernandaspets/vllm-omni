@@ -41,7 +41,7 @@ from .comm.comm_quant import (  # the ported Sol-H3 primitives (same packet form
 logger = logging.getLogger(__name__)
 
 TAG = "[h3_a2a_wire]"
-_STATE = {"calls": 0, "failed": False}
+_STATE = {"calls": 0, "fused_calls": 0, "failed": False}
 _POOL: dict[tuple, torch.Tensor] = {}
 
 
@@ -415,9 +415,57 @@ def all_to_all_4d_qkv_fused(input_t: torch.Tensor, group, world: int):
                 num_warps=_warps(),
             )
         _log_mode_once("int8-fused")
-        _STATE["calls"] += 1
+        _STATE["fused_calls"] += 1
         return out
     except Exception as exc:  # never break the lane
         _STATE["failed"] = True
         _log(f"int8-fused FAILED ({type(exc).__name__}: {exc}) -> bf16 for this run")
         return None
+
+
+# ---------------------------------------------------------------------------
+# Registration with the generic distributed layer
+# ---------------------------------------------------------------------------
+# comm.py ships only the stock exchange. The H3 model installs this transport from
+# here during setup, so the generic layer carries no H3 knowledge.
+
+
+def _exchange_adapter(input_t: torch.Tensor, group) -> torch.Tensor:
+    """Stock-interface exchange; resolves the wire mode (bf16 by default) on every call."""
+    return all_to_all_4d(input_t, group, dist.get_world_size(group))
+
+
+def _fused_4d_adapter(input_t: torch.Tensor, group, seq_world_size: int, use_sync: bool):
+    """Whole-call override for the qkv direction; None means "use the stock path"."""
+    if not fused_enabled() or _STATE["failed"]:
+        return None
+    out = all_to_all_4d_qkv_fused(input_t.contiguous(), group, seq_world_size)
+    if out is not None and use_sync:
+        from vllm_omni.platforms import current_omni_platform
+
+        current_omni_platform.synchronize()
+    return out
+
+
+def install() -> None:
+    """Register this transport with ``vllm_omni.diffusion.distributed.comm``."""
+    from vllm_omni.diffusion.distributed.comm import register_seq_all_to_all_backend
+
+    register_seq_all_to_all_backend(exchange=_exchange_adapter, fused_4d=_fused_4d_adapter)
+
+
+def stats() -> dict:
+    """Transport counters: which mode is selected, how many exchanges ran, and any fallback.
+
+    ``calls`` counts per-tensor quantised exchanges and ``fused_calls`` counts
+    whole-call fused qkv exchanges; they are separate because the fused path can be dead
+    while the plain one keeps the total moving. ``failed`` latches when the wire gave up
+    and used bf16 for the rest of the run, so a caller can assert the fast path actually
+    ran instead of inferring it from a result that would look fine either way.
+    """
+    return {
+        "mode": _wire(),
+        "calls": _STATE["calls"],
+        "fused_calls": _STATE["fused_calls"],
+        "failed": _STATE["failed"],
+    }

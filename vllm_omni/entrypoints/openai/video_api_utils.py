@@ -818,6 +818,26 @@ def _encode_prepared_video_bytes_legacy(
     )
 
 
+def resolve_video_encoding_request(extra_params: Any) -> tuple[str, dict[str, Any]]:
+    """Resolve a request's video encoder choice from ``extra_params``.
+
+    The libx264 default with unbounded threads is the largest host-side cost of serving
+    video, and images that ship h264_nvenc / av1_nvenc should be able to use them, so a
+    request may name both the codec and its options.
+
+    Returns:
+        ``(video_codec, video_codec_options)`` ready for the encoder helpers.
+    """
+    video_codec = "h264"
+    video_codec_options: dict[str, Any] = {"preset": "ultrafast", "threads": "0"}
+    if isinstance(extra_params, dict):
+        if extra_params.get("video_codec") is not None:
+            video_codec = str(extra_params["video_codec"])
+        if "video_codec_options" in extra_params:
+            video_codec_options = extra_params["video_codec_options"]
+    return video_codec, video_codec_options
+
+
 def _encode_video_bytes_legacy(
     video: Any,
     fps: int,

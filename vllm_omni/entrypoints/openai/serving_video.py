@@ -38,6 +38,7 @@ from vllm_omni.entrypoints.openai.video_api_utils import (
     _encode_video_bytes,
     _PlanarFrameConverter,
     encode_video_base64,
+    resolve_video_encoding_request,
 )
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 from vllm_omni.metrics import count_video_frames
@@ -548,16 +549,7 @@ class OmniOpenAIServingVideo:
             latent_edit_input=latent_edit_input,
         )
 
-        # A request may pick the encoder. The libx264 default with unbounded
-        # threads is the largest host-side cost of serving video, and the image
-        # ships h264_nvenc / av1_nvenc.
-        video_codec = (
-            str(request.extra_params.get("video_codec", "h264")) if isinstance(request.extra_params, dict) else "h264"
-        )
-        video_codec_options = {"preset": "ultrafast", "threads": "0"}
-        if request.extra_params is not None and isinstance(request.extra_params, dict):
-            if "video_codec_options" in request.extra_params:
-                video_codec_options = request.extra_params["video_codec_options"]
+        video_codec, video_codec_options = resolve_video_encoding_request(request.extra_params)
 
         encoding_options = self._video_encoding_options()
 
@@ -621,16 +613,7 @@ class OmniOpenAIServingVideo:
             )
         audio = artifacts.audios[0]
 
-        # A request may pick the encoder. The libx264 default with unbounded
-        # threads is the largest host-side cost of serving video, and the image
-        # ships h264_nvenc / av1_nvenc.
-        video_codec = (
-            str(request.extra_params.get("video_codec", "h264")) if isinstance(request.extra_params, dict) else "h264"
-        )
-        video_codec_options = {"preset": "ultrafast", "threads": "0"}
-        if request.extra_params is not None and isinstance(request.extra_params, dict):
-            if "video_codec_options" in request.extra_params:
-                video_codec_options = request.extra_params["video_codec_options"]
+        video_codec, video_codec_options = resolve_video_encoding_request(request.extra_params)
 
         action = artifacts.actions[0]
         video_metadata = _video_metadata_from_artifacts(artifacts)

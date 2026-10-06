@@ -16,7 +16,7 @@ without a restart, and a missing/unreadable file can only fall back to stock.
 Numerics note: under the int8 wire arm the batched call computes one activation scale for the
 stacked batch instead of one per tensor, so the int8 result is NOT bit-identical; the bf16 arm is.
 
-Imported through the env-gated branch in vllm_omni/diffusion/attention/parallel/ulysses.py.
+Registered with vllm_omni/diffusion/attention/parallel/ulysses.py by the H3 model at setup.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ from vllm_omni.diffusion.distributed.comm import SeqAllToAll4D
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["enabled", "batched_seq_a2a"]
+__all__ = ["enabled", "batched_seq_a2a", "install"]
 
 _CACHE_TTL = 1.0
 _cached: tuple[float, bool] | None = None
@@ -92,3 +92,17 @@ def batched_seq_a2a(
     out = SeqAllToAll4D.apply(group, stacked, scatter_idx, gather_idx, use_sync)
     # Row-major slices of a contiguous tensor are contiguous, so this is a view, not a copy.
     return [out[i * bsz : (i + 1) * bsz] for i in range(len(tensors))]
+
+
+def _registered_adapter(group, tensors, scatter_idx, gather_idx, use_sync):
+    """Adapter the generic Ulysses path calls; None means "not selected, use stock"."""
+    if not enabled():
+        return None
+    return batched_seq_a2a(group, tensors, scatter_idx, gather_idx, use_sync)
+
+
+def install() -> None:
+    """Register this batching with the generic parallel-attention layer."""
+    from vllm_omni.diffusion.attention.parallel.ulysses import register_batched_qkv_exchange
+
+    register_batched_qkv_exchange(_registered_adapter)

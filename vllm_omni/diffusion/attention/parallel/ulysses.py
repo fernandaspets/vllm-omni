@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, Callable
 
 import torch
 import torch.distributed as dist
@@ -13,19 +14,6 @@ from vllm.logger import init_logger
 from vllm_omni.diffusion.attention.backends.abstract import AttentionMetadata
 from vllm_omni.diffusion.attention.parallel.base import ParallelAttentionContext
 from vllm_omni.diffusion.distributed.comm import SeqAllToAll4D
-
-try:  # H3 a2a qkv batching (env-gated, default off; port dir on PYTHONPATH)
-    from vllm_omni.diffusion.h3.a2a_qkv_batch import batched_seq_a2a as _h3_a2a_qkv_batch
-    from vllm_omni.diffusion.h3.a2a_qkv_batch import enabled as _h3_a2a_qkv_batch_enabled
-except Exception:  # pragma: no cover - stock behaviour without the port module
-
-    def _h3_a2a_qkv_batch_enabled() -> bool:
-        return False
-
-    def _h3_a2a_qkv_batch(*args, **kwargs):
-        raise RuntimeError("h3_a2a_qkv_batch is not importable")
-
-
 from vllm_omni.diffusion.distributed.group_coordinator import SequenceParallelGroupCoordinator
 from vllm_omni.diffusion.forward_context import (
     get_forward_context,
@@ -34,6 +22,24 @@ from vllm_omni.diffusion.forward_context import (
 )
 
 logger = init_logger(__name__)
+
+# A model may move the q/k/v triple in a single collective instead of one exchange per
+# tensor. It registers that here from its own package, so this generic parallel-attention
+# module never imports a model.
+_BatchedQKVExchange = Callable[[Any, list, int, int, bool], "list | None"]
+
+_batched_qkv_exchange: Any = None
+
+
+def register_batched_qkv_exchange(backend) -> None:
+    """Install a model-provided batched q/k/v exchange; ``None`` restores the stock path.
+
+    ``backend(group, tensors, scatter_idx, gather_idx, use_sync)`` returns the exchanged
+    tensors in the same order, or ``None`` to fall through to the per-tensor stock path
+    (which is how a runtime-disabled backend reports itself).
+    """
+    global _batched_qkv_exchange
+    _batched_qkv_exchange = backend
 
 # When advanced_uaa pads Q by the GQA ratio, MQA/very-uneven-GQA shapes can
 # inflate the query-head count substantially (worst case: MQA @ U=N pads Q from
@@ -548,14 +554,19 @@ class UlyssesParallelAttention:
                 if gate_compress is not None:
                     gate_compress = ulysses_qkv_fwd(gate_compress, group_name, ulysses_world_size)
             else:
-                if _h3_a2a_qkv_batch_enabled():
-                    _h3_batch = [query, key, value] + ([gate_compress] if gate_compress is not None else [])
-                    _h3_res = _h3_a2a_qkv_batch(
-                        self._ulysses_pg, _h3_batch, self._scatter_idx, self._gather_idx, self._use_sync
+                _batched_res = None
+                if _batched_qkv_exchange is not None:
+                    _batched_res = _batched_qkv_exchange(
+                        self._ulysses_pg,
+                        [query, key, value] + ([gate_compress] if gate_compress is not None else []),
+                        self._scatter_idx,
+                        self._gather_idx,
+                        self._use_sync,
                     )
-                    query, key, value = _h3_res[0], _h3_res[1], _h3_res[2]
+                if _batched_res is not None:
+                    query, key, value = _batched_res[0], _batched_res[1], _batched_res[2]
                     if gate_compress is not None:
-                        gate_compress = _h3_res[3]
+                        gate_compress = _batched_res[3]
                 else:
                     query = SeqAllToAll4D.apply(
                         self._ulysses_pg, query, self._scatter_idx, self._gather_idx, self._use_sync
