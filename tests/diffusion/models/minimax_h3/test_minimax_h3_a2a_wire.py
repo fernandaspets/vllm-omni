@@ -22,6 +22,7 @@ from typing import Literal
 import pytest
 import torch
 
+from tests.helpers.mark import hardware_marks
 from vllm_omni.diffusion.distributed.parallel_state import (
     destroy_distributed_env,
     get_sp_group,
@@ -30,7 +31,10 @@ from vllm_omni.diffusion.distributed.parallel_state import (
 )
 from vllm_omni.platforms import current_omni_platform
 
-pytestmark = [pytest.mark.core_model, pytest.mark.diffusion]
+# The collective exercises world_size 2 and 4 over real NCCL, so it needs four cards.
+_FOUR_CARD = hardware_marks(res={"cuda": "H100"}, num_cards=4)
+
+pytestmark = [*_FOUR_CARD, pytest.mark.core_model, pytest.mark.diffusion]
 
 DeviceKind = Literal["cpu", "cuda"]
 

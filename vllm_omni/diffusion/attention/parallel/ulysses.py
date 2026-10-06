@@ -3,8 +3,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -40,6 +41,7 @@ def register_batched_qkv_exchange(backend) -> None:
     """
     global _batched_qkv_exchange
     _batched_qkv_exchange = backend
+
 
 # When advanced_uaa pads Q by the GQA ratio, MQA/very-uneven-GQA shapes can
 # inflate the query-head count substantially (worst case: MQA @ U=N pads Q from

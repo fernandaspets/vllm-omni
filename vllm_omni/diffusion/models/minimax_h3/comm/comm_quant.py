@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
+
 """Aligned block-int8 transport for the MiniMax-H3 Ulysses QKV exchange.
 
 The UE5M3 packet format - 128-value vectors, group-32 finite-positive scale codes, and the
@@ -9,8 +12,7 @@ uses. The format is kept byte-compatible so a packet produced here decodes again
 from __future__ import annotations
 
 import torch
-import triton
-import triton.language as tl
+from vllm.triton_utils import tl, triton
 
 from .quant_kernels import _encode_ue5m3_int8
 

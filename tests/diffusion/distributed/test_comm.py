@@ -513,7 +513,6 @@ def _run_registered_exchange_backend(
     master_port: int,
 ) -> None:
     """A registered transport must be used, and must never silently fall back to stock."""
-    import torch.distributed as dist
 
     from vllm_omni.diffusion.distributed.comm import all_to_all_4D, register_seq_all_to_all_backend
 

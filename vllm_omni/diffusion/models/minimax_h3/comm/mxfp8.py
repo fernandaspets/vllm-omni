@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
+
 """Shim for Sol-H3's `mxfp8` module inside the ported `h3comm` package.
 
 `comm_quant.merge_output_fp8_as_mxfp8` returns Sol-H3's `MXActivation` so the transported E4M3 bytes

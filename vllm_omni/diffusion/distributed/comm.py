@@ -1,8 +1,10 @@
 # Copyright (c) Microsoft Corporation and Jiarui Fang
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 # DeepSpeed Team & Jiarui Fang
 #  from https://github.com/feifeibear/long-context-attention/blob/main/yunchang/comm/all_to_all.py
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -30,7 +32,10 @@ _seq_all_to_all_exchange: Any = None
 _seq_all_to_all_4d_fused: Any = None
 
 
-def register_seq_all_to_all_backend(exchange=None, fused_4d=None) -> None:
+def register_seq_all_to_all_backend(
+    exchange: _SeqAllToAllExchange | None = None,
+    fused_4d: _SeqAllToAll4DFused | None = None,
+) -> None:
     """Install a model-provided all-to-all transport; ``None`` restores the stock path.
 
     Args:

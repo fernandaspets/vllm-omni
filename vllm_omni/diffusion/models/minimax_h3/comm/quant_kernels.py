@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
+
 """Shared Triton helpers for the quantised collectives.
 
 Implements the UE5M3 wire format described in ``comm_quant`` (Sol-H3's ``h3_runtime/comm_quant.py``,
@@ -6,9 +9,7 @@ NVlabs/Sana sol-engine, Apache-2.0) and kept byte-compatible with it.
 
 from __future__ import annotations
 
-import triton
-import triton.language as tl
-from triton.language.extra import libdevice
+from vllm.triton_utils import tl, tldevice, triton
 
 
 @triton.jit
@@ -34,7 +35,7 @@ def _encode_ue5m3_int8(values, GROUPS: tl.constexpr):
     encoded_scale = ((exponent + 15) << 3) | mantissa
     decoded_bits = ((exponent + 127) << 23) | (mantissa << 20)
     decoded_scale = decoded_bits.to(tl.float32, bitcast=True)
-    inverse_scale = libdevice.fast_dividef(1.0, decoded_scale)
+    inverse_scale = tldevice.fast_dividef(1.0, decoded_scale)
     scaled = values * inverse_scale[:, None]
     rounded = tl.where(scaled >= 0.0, tl.floor(scaled + 0.5), tl.ceil(scaled - 0.5))
     quantized = tl.maximum(-127.0, tl.minimum(127.0, rounded)).to(tl.int32)

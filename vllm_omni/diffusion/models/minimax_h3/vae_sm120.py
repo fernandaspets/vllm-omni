@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
+
 """Port of SGLang's SM12x fix for the MiniMax-H3 video VAE decoder: avoid the fused-bias epilogue.
 
 Reference: sgl-project/sglang `python/sglang/multimodal_gen/runtime/models/vaes/minimax_h3_video_vae/`
@@ -15,7 +18,7 @@ sm90/sm100/sm103 only, so `resolve_h3_vae_operators()` returns None on sm12x and
 `install_h3_vae_optimizations()` returns False - which is also why the fp16 block-linear persistence
 that function performs elsewhere never happens here.
 
-Modes (`H3_VAE_SM120`; unset or unparseable always means stock):
+Modes (`H3_VAE_SM120`; unset or unparsable always means stock):
   0  stock (wrappers may be installed but always delegate)
   1  unfused `w2`: `matmul(x, w.t()) + bias` on CUDA when dtypes line up
   2  mode 1 plus one-time fp16 materialization of the decoder-block Linear weights

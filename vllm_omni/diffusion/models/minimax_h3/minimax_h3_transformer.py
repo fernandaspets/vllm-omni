@@ -1154,6 +1154,67 @@ class MiniMaxH3SPGather(nn.Module):
         return hidden_states
 
 
+# The H3 wide linears this model can swap onto a lower-precision kernel, keyed by the
+# leaf name used in the checkpoint. The per-role choice can come from the model's
+# quantization config; see resolve_role_precision.
+H3_ROLE_LEAVES = {
+    "qkv_proj": "attn",
+    "out_proj": "attn",
+    "fc1": "mlp",
+    "fc2": "mlp",
+}
+
+
+def resolve_role_precision(
+    quant_config: object,
+    module_prefix: str,
+    *,
+    component: str = "transformer",
+) -> str | None:
+    """Return the precision a quantization config asks for at *module_prefix*.
+
+    Returns ``"nvfp4"`` or ``"mxfp8"``, ``"bf16"`` when the config names the prefix but
+    asks for a format this model cannot express, and ``None`` when the config says
+    nothing about the prefix (so the caller keeps its own default arm).
+
+    The three-way result matters: "unset" must fall back to the model's own default,
+    while an explicit ``null`` entry means "leave this role on bf16".
+
+    Only an explicit key counts. A per-component config's *default* entry is not a
+    statement about any particular role, and treating it as one would let a
+    component-wide default silently override the model's built-in per-role default.
+
+    ``module_prefix`` is tried qualified with the pipeline component name first
+    (``transformer.blocks.0.mlp.fc1``) and then as the model's own module path
+    (``blocks.0.mlp.fc1``), so a config may address a role either way.
+    """
+    from vllm_omni.quantization.component_config import ComponentQuantizationConfig
+
+    if quant_config is None:
+        return None
+    resolved: object
+    if isinstance(quant_config, ComponentQuantizationConfig):
+        named = False
+        resolved = None
+        for candidate in (f"{component}.{module_prefix}", module_prefix):
+            if quant_config.matches(candidate):
+                named = True
+                resolved = quant_config.resolve(candidate)
+                break
+        if not named:
+            return None  # says nothing about this role: keep the model's default
+    else:
+        resolved = quant_config  # a plain config is global
+    if resolved is None:
+        return "bf16"  # explicitly named and explicitly unquantized
+    name = (getattr(resolved, "get_name", lambda: "")() or "").lower()
+    if "nvfp4" in name or "mxfp4" in name:
+        return "nvfp4"
+    if "mxfp8" in name:
+        return "mxfp8"
+    return "bf16"  # a format this swap cannot express; do not guess
+
+
 class MiniMaxH3DiTModel(nn.Module):
     # Loading is tensor-complete: constructor state plus final-layout
     # parameters and persistent buffers is sufficient to reconstruct a ready
@@ -1257,6 +1318,9 @@ class MiniMaxH3DiTModel(nn.Module):
         partition: str = "ref2va",
     ) -> None:
         super().__init__()
+        # Kept so the per-role precision choice below can be expressed through the existing
+        # quantization config instead of an H3-only configuration plane.
+        self.quant_config = quant_config
         # The served partition. The turbo-fuse path validates an adapter against it, and the
         # loader rejects an fl2v adapter on Ref2VA and a ref2v adapter anywhere but Ref2VA.
         self._h3_partition = partition
@@ -1495,7 +1559,7 @@ class MiniMaxH3DiTModel(nn.Module):
         # ``qkv_proj`` whose rows are [q; k; v]. Pack them here, and only touch the wide linears
         # MXFP8 actually wraps -- the token-refiner linears keep vLLM's dynamic LoRA, so fusing
         # those too would apply the delta twice.
-        import re
+        import regex as re
 
         packed: dict[str, dict[str, object]] = {}
         plain: dict[str, list[object]] = {}
@@ -1617,7 +1681,28 @@ class MiniMaxH3DiTModel(nn.Module):
             "mxfp8",
         )
 
-        def _cls_for(leaf: str):
+        def _cls_for(leaf: str, module_prefix: str):
+            """Resolve one role's kernel.
+
+            The model's quantization config wins when it names the role (see
+            resolve_role_precision); otherwise the arm env gates decide, exactly as
+            before. A configured NVFP4 role without the NVFP4 kernels loaded is a
+            configuration error, not something to paper over with MXFP8.
+            """
+            requested = resolve_role_precision(self.quant_config, module_prefix)
+            if requested == "nvfp4":
+                if _Nvfp4Cls is None:
+                    raise ValueError(
+                        f"quantization config selects NVFP4 for {module_prefix} but the NVFP4 "
+                        "kernels are not loaded; enable VLLM_OMNI_DIT_NVFP4 or remove the "
+                        "per-role entry"
+                    )
+                return _Nvfp4Cls
+            if requested == "mxfp8":
+                return _Mxfp8Cls
+            if requested == "bf16":
+                return None  # config named this role: leave the original linear in place
+            # Not named: the arm env gates decide, exactly as before.
             if _nvfp4_ready and leaf in ("fc1", "fc2"):
                 return _Nvfp4Cls
             return _Mxfp8Cls
@@ -1639,7 +1724,8 @@ class MiniMaxH3DiTModel(nn.Module):
                 key = f"blocks.{index}.{leaf}.weight"
                 values = stash_w.pop(key, None)
                 scales = stash_s.pop(key, None)
-                cls = _cls_for(name)  # bare role name (leaf may be dotted, e.g. 'attn.qkv_proj')
+                # bare role name (leaf may be dotted, e.g. 'attn.qkv_proj')
+                cls = _cls_for(name, f"blocks.{index}.{leaf}")
                 if cls is None:
                     return None  # bf16 role: leave the original vLLM linear in place
                 if values is not None and scales is not None:
@@ -1699,8 +1785,7 @@ class MiniMaxH3DiTModel(nn.Module):
                         freed += weight.numel() * weight.element_size()
                         weight.data = weight.data.new_empty(0)
         logger.info(
-            "MiniMax-H3 quant: mxfp8=%d (%d shapes) nvfp4=%d (%d shapes) "
-            "bf16_roles=%d checkpoint=%d freed=%.1f GiB",
+            "MiniMax-H3 quant: mxfp8=%d (%d shapes) nvfp4=%d (%d shapes) bf16_roles=%d checkpoint=%d freed=%.1f GiB",
             len(mxfp8_mods),
             len(prepared),
             len(nvfp4_mods),

@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-import os
-
 from vllm.logger import init_logger
 
 from vllm_omni.diffusion.attention.parallel.allgather_kv import (
@@ -42,12 +40,14 @@ def build_parallel_attention_strategy(
     if not is_forward_context_available():
         return NoParallelAttention()
     cfg = get_forward_context().omni_diffusion_config
+    if cfg is None:
+        return NoParallelAttention()
     p = cfg.parallel_config
 
     ulysses_degree = getattr(p, "ulysses_degree", 1)
     ring_degree = getattr(p, "ring_degree", 1)
     allgather_degree = getattr(p, "allgather_degree", 1)
-    ulysses_a2a_permute = getattr(p, "ulysses_a2a_permute", False) or (os.environ.get("H3_A2A_PERMUTE", "0") == "1")
+    ulysses_a2a_permute = getattr(p, "ulysses_a2a_permute", False)
 
     sp_configured = ulysses_degree > 1 or ring_degree > 1 or allgather_degree > 1
     if not sp_configured:

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
+
 """Quantised TP all-reduce for the MiniMax-H3 diffusion lane.
 
 Same wire idea as the Ulysses a2a (`h3_a2a_wire.py`) applied to the TP reduction, which is the
@@ -28,8 +31,7 @@ import os
 
 import torch
 import torch.distributed as dist
-import triton
-import triton.language as tl
+from vllm.triton_utils import tl, triton
 
 from . import a2a_wire as w
 

@@ -5,13 +5,13 @@ import dataclasses
 import glob
 import json
 import os
-import re
 import time
 from collections.abc import Callable, Generator, Iterable, Sequence
 from pathlib import Path
 from typing import cast
 
 import huggingface_hub
+import regex as re
 import torch
 from torch import nn
 from vllm.config.load import LoadConfig

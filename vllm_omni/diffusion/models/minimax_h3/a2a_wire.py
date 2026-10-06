@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
+
 """Env-gated int8 (UE5M3) transport for the H3 lane's Ulysses all-to-all. Default OFF.
 
 Why: the Ulysses exchange is 632-648 ms/step (200 calls, 4 per block) at ~22 GB/s = PCIe Gen4 x16 wire
@@ -27,8 +30,7 @@ import os
 
 import torch
 import torch.distributed as dist
-import triton
-import triton.language as tl
+from vllm.triton_utils import tl, triton
 
 from .comm.comm_quant import (  # the ported Sol-H3 primitives (same packet format)
     OUTPUT_PACKET,

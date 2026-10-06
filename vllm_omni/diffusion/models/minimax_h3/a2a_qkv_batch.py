@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
+
 """Batch the Ulysses q/k/v/gate all-to-all into ONE collective (control-file gated).
 
 Why: the H3 DiT issues four separate all_to_all calls per block for q, k, v and the VSA

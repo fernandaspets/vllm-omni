@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 """NVFP4 (W4A4) DiT linears for the H3 lane - experimental arm, opt-in via VLLM_OMNI_DIT_NVFP4=1.
 
 A sibling of ``vllm_omni.diffusion.models.minimax_h3.b12x_mxfp8`` (``Mxfp8Linear`` /
