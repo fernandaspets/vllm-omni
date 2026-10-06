@@ -8,8 +8,9 @@ Scheme (world == 2):
     y = x_local + dequant(quant(x_peer))        # each rank keeps its own contribution exact
 
 so the error is only the peer's quantisation error: one rounding of the peer's tensor, on a path
-that already runs quantised activations. The saving is in the collective, which is the largest single
-line in the step at this shape; measure it on the target wire rather than assuming it from a bench.
+that already runs quantised activations. The saving is in the collective - one of the largest lines
+in the step at this shape - and it has to be measured on the target wire, because the in-situ
+collective is cheaper than the isolated benchmark predicts.
 
 Env:
     H3_AR_WIRE=int8|bf16        default bf16 (== the original behaviour, byte-identical)

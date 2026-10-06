@@ -1,7 +1,7 @@
 """Shared Triton helpers for the quantised collectives.
 
-The UE5M3 encoder is ported from Sol-H3 (SGLang's MiniMax-H3 runtime, Apache-2.0); the wire format
-is theirs and is kept byte-compatible.
+Implements the UE5M3 wire format described in ``comm_quant`` (Sol-H3's ``h3_runtime/comm_quant.py``,
+NVlabs/Sana sol-engine, Apache-2.0) and kept byte-compatible with it.
 """
 
 from __future__ import annotations
