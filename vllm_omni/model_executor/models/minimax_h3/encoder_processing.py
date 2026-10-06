@@ -671,14 +671,15 @@ def _image_from_tensor(value: torch.Tensor) -> Image.Image:
     return Image.fromarray(array, mode="RGB")
 
 
-# --- LOCAL ADDITION (2026-10-01): RefMod identity-latent injection -----------
-# ComfyUI-MiniMaxH3Mod RefMods are pre-encoded identity latents: a single
-# "latent" tensor of shape [1, C, T, H, W] in the H3 video-VAE latent space.
-# Feeding them through the VAE is impossible (they are pooled for the DiT's
-# reference-token path and do not decode to an image), so inject them directly
-# as reference rows. H3_REFMOD_PATHS is an os.pathsep-separated list of
-# .safetensors paths; H3_REFMOD_NORMALIZE=1 applies (latent - mean) / std first
-# (the engine's own image path does this before patchifying).
+# Optional identity conditioning from pre-encoded latents.
+#
+# An identity adapter is a single pre-encoded latent of shape [1, C, T, H, W] in the H3 video-VAE
+# latent space. It is pooled for the DiT's reference-token path and does not decode to an image, so
+# it cannot be fed through the VAE; it is injected directly as reference rows instead.
+#
+# H3_REFMOD_PATHS is an os.pathsep-separated list of .safetensors files.
+# H3_REFMOD_NORMALIZE=1 applies (latent - mean) / std first, which is what the engine's own image
+# path does before patchifying. Unset by default.
 def _refmod_paths_from_env() -> list[str]:
     raw = os.environ.get("H3_REFMOD_PATHS", "").strip()
     return [item for item in raw.split(os.pathsep) if item] if raw else []

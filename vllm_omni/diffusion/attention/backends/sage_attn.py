@@ -62,7 +62,7 @@ class SageAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_packed_mask_free(cls) -> bool:
-        # LOCAL ADDITION (2026-10-02): forward_cuda dispatches sageattn_varlen
+        # forward_cuda dispatches sageattn_varlen
         # over the caller's packed cu_seqlens, so a packed sequence with padding
         # does not need a boolean attn_mask (the mask is what SAGE cannot take).
         return True
