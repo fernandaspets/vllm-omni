@@ -8,7 +8,9 @@ and route bodies that have not yet moved to endpoint-owned modules."""
 import asyncio
 import copy
 import dataclasses
+import inspect as _h3_inspect
 import json
+import logging as _h3_logging
 import multiprocessing
 import multiprocessing.forkserver as forkserver
 import os
@@ -18,6 +20,7 @@ import random
 import signal
 import socket
 import time
+import time as _h3_time
 from argparse import Namespace
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -3119,9 +3122,6 @@ if __name__ == "__main__":
 # Trigger chain: AsyncOmni.collective_rpc (async, entrypoints/async_omni.py:528) ->
 # engine.collective_rpc_async -> executor collective_rpc -> worker.execute_method -> sleep/wake_up.
 # Requires the server started with --enable-sleep-mode.
-import inspect as _h3_inspect
-import logging as _h3_logging
-import time as _h3_time
 
 
 async def _h3_engine_client(request: Request):
