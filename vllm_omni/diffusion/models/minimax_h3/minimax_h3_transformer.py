@@ -734,12 +734,41 @@ class MiniMaxH3MLP(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.fc2",
         )
+        self._mx_fc1 = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        hidden, _ = self.fc1(x)
+        mx = self._mxfp8_fc1()
+        if mx is not None:
+            hidden = mx(x)
+        else:
+            hidden, _ = self.fc1(x)
         hidden = self.act_fn(hidden)
         out, _ = self.fc2(hidden)
         return out
+
+    def _mxfp8_fc1(self):
+        """b12x MXFP8 up-projection on the local shard, or None when disabled.
+
+        Built lazily: the shard only exists after vLLM has loaded the weights. The
+        merged fc1 weight is [2*ffn_hidden/TP, hidden], quantized whole -- SiluAndMul
+        chunks the output afterwards, so the split is unaffected.
+        """
+        if not _mxfp8_enabled():
+            return None
+        if self._mx_fc1 is None:
+            from vllm_omni.diffusion.models.minimax_h3.b12x_mxfp8 import Mxfp8Linear
+
+            weight = self.fc1.weight
+            if weight.dtype != torch.bfloat16:
+                weight = weight.to(torch.bfloat16)
+            self._mx_fc1 = Mxfp8Linear(weight, name="h3-ffn-fc1-mxfp8")
+        return self._mx_fc1
+
+
+def _mxfp8_enabled() -> bool:
+    from vllm_omni.diffusion.models.minimax_h3.b12x_mxfp8 import enabled
+
+    return enabled()
 
 
 class MiniMaxH3AdalnProj(nn.Module):
