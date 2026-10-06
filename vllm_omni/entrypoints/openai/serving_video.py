@@ -548,6 +548,14 @@ class OmniOpenAIServingVideo:
             latent_edit_input=latent_edit_input,
         )
 
+        # A request may pick the encoder. The libx264 default with unbounded
+        # threads is the largest host-side cost of serving video, and the image
+        # ships h264_nvenc / av1_nvenc.
+        video_codec = (
+            str(request.extra_params.get("video_codec", "h264"))
+            if isinstance(request.extra_params, dict)
+            else "h264"
+        )
         video_codec_options = {"preset": "ultrafast", "threads": "0"}
         if request.extra_params is not None and isinstance(request.extra_params, dict):
             if "video_codec_options" in request.extra_params:
@@ -563,6 +571,7 @@ class OmniOpenAIServingVideo:
                 fps=artifacts.output_fps,
                 audio=artifacts.audios[idx],
                 audio_sample_rate=artifacts.audio_sample_rate,
+                video_codec=video_codec,
                 video_codec_options=video_codec_options,
                 frame_converter=self._video_frame_converter,
                 **encoding_options,
@@ -614,6 +623,14 @@ class OmniOpenAIServingVideo:
             )
         audio = artifacts.audios[0]
 
+        # A request may pick the encoder. The libx264 default with unbounded
+        # threads is the largest host-side cost of serving video, and the image
+        # ships h264_nvenc / av1_nvenc.
+        video_codec = (
+            str(request.extra_params.get("video_codec", "h264"))
+            if isinstance(request.extra_params, dict)
+            else "h264"
+        )
         video_codec_options = {"preset": "ultrafast", "threads": "0"}
         if request.extra_params is not None and isinstance(request.extra_params, dict):
             if "video_codec_options" in request.extra_params:
@@ -643,6 +660,7 @@ class OmniOpenAIServingVideo:
         video_bytes = _encode_video_bytes(
             artifacts.videos[0],
             fps=artifacts.output_fps,
+            video_codec=video_codec,
             video_codec_options=video_codec_options,
             frame_converter=self._video_frame_converter,
             **encoding_options,
