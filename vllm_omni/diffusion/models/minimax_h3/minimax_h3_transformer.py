@@ -1699,9 +1699,8 @@ class MiniMaxH3DiTModel(nn.Module):
                         freed += weight.numel() * weight.element_size()
                         weight.data = weight.data.new_empty(0)
         logger.info(
-            "MiniMax-H3 quant: %s | mxfp8=%d (%d shapes) nvfp4=%d (%d shapes) "
+            "MiniMax-H3 quant: mxfp8=%d (%d shapes) nvfp4=%d (%d shapes) "
             "bf16_roles=%d checkpoint=%d freed=%.1f GiB",
-            "mlp=nvfp4 attn=mxfp8 refiner=bf16",
             len(mxfp8_mods),
             len(prepared),
             len(nvfp4_mods),
