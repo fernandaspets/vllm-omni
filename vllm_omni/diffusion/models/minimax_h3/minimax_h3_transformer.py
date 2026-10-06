@@ -1588,10 +1588,10 @@ class MiniMaxH3DiTModel(nn.Module):
             # NVFP4 (W4A4): same b12x op, FP4 weight, per-call activation global scale.
             # Measured 2.13x on the four linears at M=19904; receipts in
             # profile/sparse-attn-01/fp4/FINDINGS-nvfp4.md. Needs the port dir on PYTHONPATH.
-            from h3_nvfp4 import Nvfp4Linear as _Nvfp4Cls
-            from h3_nvfp4 import prepare_shared as _nvfp4_prepare
-        from h3_quant_policy import describe as _quant_describe
-        from h3_quant_policy import policy_for as _policy_for
+            from vllm_omni.diffusion.h3.nvfp4 import Nvfp4Linear as _Nvfp4Cls
+            from vllm_omni.diffusion.h3.nvfp4 import prepare_shared as _nvfp4_prepare
+        from vllm_omni.diffusion.h3.quant_policy import describe as _quant_describe
+        from vllm_omni.diffusion.h3.quant_policy import policy_for as _policy_for
 
         logger.info("MiniMax-H3 quant: %s", _quant_describe())
 

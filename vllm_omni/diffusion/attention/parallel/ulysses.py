@@ -15,8 +15,8 @@ from vllm_omni.diffusion.attention.parallel.base import ParallelAttentionContext
 from vllm_omni.diffusion.distributed.comm import SeqAllToAll4D
 
 try:  # H3 a2a qkv batching (env-gated, default off; port dir on PYTHONPATH)
-    from h3_a2a_qkv_batch import batched_seq_a2a as _h3_a2a_qkv_batch
-    from h3_a2a_qkv_batch import enabled as _h3_a2a_qkv_batch_enabled
+    from vllm_omni.diffusion.h3.a2a_qkv_batch import batched_seq_a2a as _h3_a2a_qkv_batch
+    from vllm_omni.diffusion.h3.a2a_qkv_batch import enabled as _h3_a2a_qkv_batch_enabled
 except Exception:  # pragma: no cover - stock behaviour without the port module
 
     def _h3_a2a_qkv_batch_enabled() -> bool:

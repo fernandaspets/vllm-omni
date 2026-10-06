@@ -16,7 +16,7 @@ __all__ = ["all_to_all_4D", "all_to_all_5D", "SeqAllToAll4D", "SeqAllToAll5D", "
 def _h3_a2a_wire_all_to_all(input_t, group, seq_world_size):
     """[experiment] optional int8 transport; falls back to the bf16 exchange (default path)."""
     try:
-        import h3_a2a_wire
+        from vllm_omni.diffusion.h3 import a2a_wire as h3_a2a_wire
 
         return h3_a2a_wire.all_to_all_4d(input_t, group, seq_world_size)
     except Exception:  # pragma: no cover - never break the collective
@@ -55,7 +55,7 @@ def all_to_all_4D(
         # source rows and write the final (bs, seqlen, hc/P, hs) layout, so the two bf16 layout
         # passes around the collective disappear. Returns None -> stock path below.
         try:
-            import h3_a2a_wire as _h3a2aw
+            from vllm_omni.diffusion.h3 import a2a_wire as _h3a2aw
 
             if _h3a2aw.fused_enabled():
                 _fused = _h3a2aw.all_to_all_4d_qkv_fused(input.contiguous(), group, seq_world_size)
