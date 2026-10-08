@@ -54,7 +54,8 @@ if current_omni_platform.is_xpu():
         _sagev1_scale_param = "scale"
 else:
     try:
-        from sageattention import sageattn as _sageattn, sageattn_varlen
+        from sageattention import sageattn as _sageattn
+        from sageattention import sageattn_varlen
 
         sageattn = _sageattn
     except ImportError:
